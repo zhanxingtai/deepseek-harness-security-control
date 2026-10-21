@@ -1,0 +1,42 @@
+node_modules/
+
+# Build artifacts — produced by `pnpm build`.
+lib/
+install/
+# 泛化到任意 tsconfig：原先逐个列 `tsconfig.tsbuildinfo` /
+# `tsconfig.client.tsbuildinfo`，新增第三个 tsconfig 就会漏。
+*.tsbuildinfo
+# pnpm-only project — do not commit npm lockfiles.
+package-lock.json
+
+# Local secrets — never commit. `.npmrc` 是固化配置（无密钥）故跟踪，
+# 但同目录的 .env 一旦写进去就会直接进版本库。
+.env
+.env.*
+!.env.example
+
+# Local test data captured during dsh runs — not source.
+security-events.jsonl
+security-debug.jsonl
+
+# Claude Code local state — never commit.
+.claude/
+.ccgui/
+
+# Stray zero-byte file at repo root from a prior install attempt.
+# Not a symlink, not a tool. Safer to ignore at the repo root only.
+/node
+
+# Generated tarballs / log files at repo root.
+*.tgz
+*.log
+
+# Claude Code / AI-agent development instructions — local reference only.
+# （正式版是跟踪的 AGENTS.md；CLAUDE.md 只是本地副本）
+CLAUDE.md
+
+# OS and editor noise.
+.DS_Store
+*.swp
+*~
+

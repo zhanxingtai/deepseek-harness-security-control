@@ -1,0 +1,33 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SECURITY_MONITOR_CSS > references only tokens that exist in the harness theme (snapshot) 1`] = `
+[
+  "bg-base",
+  "bg-layer-",
+  "border-l",
+  "brand-accent",
+  "brand-primary",
+  "button-primary-fill",
+  "button-primary-hover",
+  "button-success-hover",
+  "fill-secondary",
+  "interactive-bg-active",
+  "interactive-bg-hover",
+  "label-caption",
+  "label-dimmed",
+  "label-fg",
+  "label-primary",
+  "label-primary-inverted",
+  "label-secondary",
+  "label-tertiary",
+  "line-border",
+  "link-fg",
+  "state-error-primary",
+  "state-primary",
+  "state-success-primary",
+  "state-warn-primary",
+  "state-warning-primary",
+  "surface-bg",
+  "surface-hover",
+]
+`;

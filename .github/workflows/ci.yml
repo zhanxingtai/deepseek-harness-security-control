@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    # Drop the branch filter so PRs against any working branch run the
+    # same gates. Public forks land on `main`, but contributors may also
+    # open PRs from `feature/*` etc. — excluding them only re-creates the
+    # silent-CI failure mode this file previously had.
+
+# Default to least-privileged token; this workflow only checks out code
+# and runs tests — no write operations on the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch to save minutes. Don't cancel
+# pushes — those are usually fast-followed by the same SHA.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Open-source hygiene: keep this repo free of external adapter code and
+  # machine-specific absolute paths, so it can be published as-is.
+  open-source-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Forbid absolute file: dependencies"
+        run: |
+          if grep -rE '"file:/' --include=package.json . ; then
+            echo "::error::absolute file: dependencies are forbidden; use registry versions or relative file: paths"
+            exit 1
+          fi
+
+      - name: Forbid adapters/ directory
+        run: |
+          if [ -d adapters ]; then
+            echo "::error::adapters/ directory is not allowed in this repository"
+            exit 1
+          fi
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Must match `engines.node` (^22.19.0 || >=24.0.0) and
+        # `dshWorkshop.compatibility.nodeVersions`. 18/20 were never
+        # supported — CI on them only ever tested an unsupported runtime.
+        node-version: [22, 24]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 2026-09-19: pin to 10.x. pnpm 11+ forces metadata-only fetches
+          # for peerDependencies during install; the @deepseek-ai/* peer
+          # deps are private npm packages (not on registry.npmjs.org) and
+          # pnpm 11 returns ERR_PNPM_FETCH_404 even with
+          # strict-peer-dependencies=false (see pnpm/pnpm#9490). The fix
+          # landed only for some scenarios; the cleanest option is to stay
+          # on 10 until pnpm exposes a proper skip-private-peer-metadata
+          # npmrc key.
+          version: 10
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # 2026-09-25 oss-prep: explicit cache-dependency-path keeps the
+          # pnpm store keyed on the exact lockfile — if a contributor
+          # forgets to commit `pnpm-lock.yaml` the install step will fail
+          # loudly instead of silently falling back to a stale cache
+          # entry from a previous lockfile revision. The default
+          # detection (`pnpm-lock.yaml` at workspace root) already
+          # worked, but making it explicit survives `actions/setup-node`
+          # version bumps that change the default heuristic.
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      # Marketplace contract: 3-gate verification (self-contained + artifacts + readme-sync).
+      # Replaces pre-S5 `pnpm build:install` + install-bundle upload.
+      - name: Verify marketplace contract
+        run: pnpm verify
+
+      # Confirm the marketplace tarball packs cleanly (no warnings about missing
+      # peerDependencies / shadowed files). The tgz itself is not uploaded —
+      # marketplace nodes consume it via `pnpm dsh plugin add --source <tgz>`.
+      - name: Verify marketplace tarball
+        run: npm pack --dry-run
+
+  # Publish the plugin tarball to GitHub Releases on any tag (no prefix
+  # requirement). The tarball
+  # is cross-platform (pure JS client + vendored assets), so a single
+  # ubuntu build publishes it; all gates must pass first.
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [open-source-hygiene, build-and-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # prepack hook re-runs prepare + all verify gates, so a tagged
+      # release cannot ship a bundle that fails marketplace contract.
+      - name: Pack tarball
+        run: |
+          mkdir -p install
+          pnpm pack
+
+      - name: Rename tarball with tag
+        run: |
+          src=$(ls install/sst-security-control-dsh-*.tgz)
+          dst="install/sst-security-control-dsh-${GITHUB_REF_NAME}.tgz"
+          # 包内版本号与 tag 一致时源/目标同名，mv 会报 "same file"
+          if [ "$src" != "$dst" ]; then mv "$src" "$dst"; fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: install/sst-security-control-dsh-*.tgz

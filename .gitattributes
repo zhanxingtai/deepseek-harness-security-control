@@ -1,0 +1,19 @@
+# Shell scripts must be LF on every platform: they're executed on Linux
+# targets, and a CRLF working tree (core.autocrlf=true on Windows) breaks
+# the shebang (`/usr/bin/env: 'bash\r'`).  The install bundle copies
+# install.sh byte-for-byte (scripts/build-install.mjs), so the blob's LF
+# must survive checkout.
+*.sh text eol=lf
+*.ps1 text eol=crlf
+
+# 2026-10-21 oss-prep: TS sources and vitest snapshots stay LF on every
+# platform. Without an explicit rule, Windows checkouts with
+# `core.autocrlf=true` silently flip LF → CRLF on stash/pull, leaving
+# phantom `M` entries with empty diffs (vitest then complains about
+# "stale-looking" line endings on the same files). Pin to LF so the
+# working tree matches the index byte-for-byte.
+*.ts text eol=lf
+*.snap text eol=lf
+
+# git hooks (extensionless) must stay LF: CRLF breaks bash hook execution on Windows
+scripts/git-hooks/* text eol=lf

@@ -1,0 +1,177 @@
+# cordis.patch.yml — sst-security-control-dsh marketplace bundle manifest.
+#
+# DSH `packages/boot/app-boot/src/index.ts:330
+# parsePatchList` requires this file to be a top-level YAML **array** of
+# `@deepseek-ai/cordis-plugin-include` `PatchOptions`. The marketplace
+# form inserts the plugin into the host's service tree via the
+# `insert: [{ name, plugin, config }]` entry shape; `plugin` is resolved
+# relative to THIS file's location (so `./lib/index.js` lands at
+# `<bundle>/lib/index.js` after install). `config` is the same single
+# plugin config object the pre-marketplace `dev.patch.yml` carried — every key
+# below (mode, hostId, collector, application, networkCapture,
+# intervention, runtimeHooks) goes into the `config:` sub-mapping.
+#
+# background: this replaces `dev.patch.yml` + `install.sh`
+# + the Python `process_monitor.py` sidecar. The plugin only writes to
+# the local NDJSON file sink (~/.dsh/security-events.jsonl) and patches
+# Node's built-in http.request / fetch IN-PROCESS (NetworkHttpCollector
+# — emits events, does not send to any remote endpoint).
+#
+# Permissions: dshWorkshop.permissions: ["network:none"] in package.json.
+#
+# The previous platform-deployment keys (collector.endpoint, auth.*,
+# outbox.*, system.*, assetMonitor.*, environment.*, application.httpCapture.*)
+# are deliberately absent — they were platform-deployment knobs and
+# have no role in the marketplace form.
+- insert:
+    # cordis-plugin-include `PatchOptions` (vendor/loader
+    # type EntryOptions) accepts only `id`/`name`/`config`/`disabled`/`inject`
+    # — `plugin` is NOT a valid field, and `id` is required so plugin-manager's
+    # `plugin-manager/src/index.ts:460-463 declaredRows` can list this row
+    # (rows without `id:` are skip-filtered, leaving the security monitor row
+    # invisible in the UI + generating a random HMR-unstable id).
+    - id: 'sst-security-control-dsh'
+      name: 'sst-security-control-dsh'
+      config:
+        enabled: true
+        # 2026-10-10 默认 enforce — 与下层 `intervention.mode: enforce` 和 bundled
+        # `policies/default-policy.spl.yaml` 的 `mode: enforce` 三方对齐,消除
+        # "两份/三份声明不一致"。顶层 `mode` 是 normalize 时的主键(向下传播到
+        # `intervention.mode`,除非后者被显式覆盖);`intervention.mode` 也设成
+        # enforce 是双保险,确保即便 normalize 路径变化也始终 enforce。
+        # 操作员显式设 `mode: audit` 时 `modeIsExplicit=true`,优先级最高。
+        mode: enforce
+        hostId: null          # default: os.hostname()
+        containerId: host     # platform bare-metal token; do not change
+
+        collector:
+          localOutputPath: ~/.dsh/security-events.jsonl
+          batchSize: 100
+          flushIntervalMs: 1000
+          validateEvents: true
+          maxFileBytes: 52428800   # 50 MiB NDJSON rotation cap
+          diskWarnWatermarkBytes: 524288000
+          diskLowWatermarkBytes: 104857600
+          # A follow-up: install / deploy diagnostic log path.
+          # Empty string (default) = disabled, the runtime is byte-identical
+          # to the pre-feature build. Operators flip this on when triaging a
+          # marketplace install that misbehaves — every apply() error site
+          # (config_integrity_failed, env_guard_violation, schema_fallback,
+          # runtime_hook_install_failed, network_capture_install_failed,
+          # disabled_by_config) and every LocalNdjsonSink phase lands here as
+          # an NDJSON line. chmod 0o600 enforced after each write. See
+          # README.md §安装后诊断 and src/utils/debugLog.ts for the contract.
+          debugLogPath: ''
+
+        application:
+          captureUserPrompt: true
+          captureSystemPrompt: true
+          captureAgentPlan: true
+          captureReasoning: true
+          toolResultMaxChars: 100000
+          sessionTtlMs: 1800000
+
+        networkCapture:
+          enabled: true
+          redactBodies: true
+          captureResponseBody: true
+          maxBodyBytes: 1048576     # 1 MiB per body
+          sseSummaryChunks: 5
+          sseSummaryLastChunks: 1
+          includeHosts: []
+          excludeHosts: []
+          excludeUrls: []
+          sensitiveKeyPatterns: []
+          captureDns: false         # opt-in: monkey-patches Node dns
+
+        # SPL core — runtimeHook (pre-spawn seam) survives the strip.
+        # Operators can flip blockAtSubprocess: true once audit-mode false
+        # positives are confirmed (same rollout as mode: enforce on the
+        # existing tool layer).
+        runtimeHooks:
+          enabled: true
+          networkEnabled: true
+          logPath: ~/.dsh/security-events-runtime.jsonl
+          enabledAtSubprocess: true
+          blockAtSubprocess: false
+          failOpenOnError: true
+
+        intervention:
+          enabled: true
+          # 2026-10-10 默认 enforce — 与 bundled `policies/default-policy.spl.yaml`
+          # 的 `mode: enforce` 对齐,消除"两份声明不一致"。操作员在
+          # `modeIsExplicit=true` 时(如显式覆盖)不会被策略文件覆盖。
+          # 公开包用户若要回退,显式设 `mode: audit` 即可。
+          mode: enforce
+          # default policy file is YAML 1.2 (per the
+          # SPL specification §1.5 第4条 + §4.4). The legacy .json
+          # extension is still accepted by RuleLoader for back-compat,
+          # but new installations ship .yaml so rules can carry inline
+          # notes.
+          #
+          # The bundled `policies/default-policy.spl.yaml` is always
+          # appended after the operator's `policyPaths[]` (93 rules,
+          # all enabled by default). There is no config-level opt-out:
+          # `bootstrap.ts` passes it as `builtinRulePaths` explicitly, and
+          # `resolveBuiltinPaths()` has no environment-variable override —
+          # a bare `process.env` read would let anyone who can set the
+          # process environment swap the baseline rule file.
+          # To run without any builtin rules you must embed the plugin
+          # yourself and construct `InterventionEngine` with
+          # `builtinRulePaths: []`. To layer your own policy on top of the
+          # baseline instead, list it in `policyPaths[]` — it is merged
+          # ahead of the bundled file.
+          policyPath: ''
+          policyPaths: []           # layered overlays — empty by default
+          reloadIntervalMs: 30000
+          # 2026-10-10: aligned with `src/config.schema.ts:166` (150 ms
+          # rationale: synchronous V8 regex against 69+ rule set can spend
+          # 30–60 ms in worst-case paths; the legacy 50 ms deadline is
+          # below the fail-open threshold for legitimate prompt-paste
+          # payloads). Keeping this here at 50 silently re-introduced the
+          # `rm -rf /` false-positive regression the schema fix closed.
+          decisionTimeoutMs: 150
+          failStrategy: fail_open   # never lock the host when the engine is broken
+
+        # §6.2 : inline sensitive-path deny-list + plugin-owned
+        # `fs.watch` observer. The deny-list is hardcoded and non-overridable —
+        # `paths: []` is silently re-asserted to the marketplace fallback list
+        # (~/.ssh / ~/.aws / ~/.gnupg / /etc/shadow / /proc/*/environ / cloud
+        # metadata service) inside normalizeConfig. Operators can EXTEND the
+        # list (e.g. add a company-specific key path) but cannot downgrade it.
+        sensitivePathGuard:
+          enabled: true
+          paths: []                # empty → fallback to DEFAULT_SENSITIVE_PATHS
+          watchEnabled: true       # plugin-owned fs.watch (observability only)
+          watchDebounceMs: 500     # per-directory debounce window
+
+        # §6.2 第二项: inline prompt-injection fingerprint
+        # matcher (literal / unicode-normalize / role-impersonation /
+        # tag-injection / known-jailbreak-prefix × 24 hardcoded regex). Sits
+        # BEFORE sensitivePathGuard / InlineSelfProtection / SPL in the call
+        # chain so it cannot be neutralized by policy YAML edits. On hit
+        # emits security_audit/inline_prompt_injection_detect with
+        # block_code='INLINE_PROMPT_INJECTION_001'. Operators can EXTEND the
+        # 24-entry default via `patterns: ['<regex source>', ...]` but cannot
+        # downgrade it — `patterns: []` falls back to the hardcoded list.
+        inlinePromptInjection:
+          enabled: true
+          patterns: []             # empty → fallback to DEFAULT_INLINE_PROMPT_INJECTION_PATTERNS
+          excerptMaxChars: 80      # excerpt size for security_audit emission
+
+        # stdio byte-mirror wrapper — opt-in observability
+        # default OFF in marketplace form. The wrapper
+        # (lib/runtime/stdio-mirror.js) is a separate Node.js subprocess
+        # spawned by the harness via RuntimeHook.wrap() argv rewrite; the
+        # fork is harness-side, NOT plugin-side (so dependencies: {} +
+        # dshWorkshop.permissions: ["network:none"] still hold), but it
+        # conflicts with AGENTS.md "marketplace 形态不允许派生子进程"
+        # invariant. Default-off locks the marketplace form to that
+        # documented posture. Operators who need byte-level stdio capture
+        # flip this to true after confirming the wrapper behaves on
+        # their target OS — the real-fork test coverage is Linux-only;
+        # Windows was the original failure surface.
+        stdioMirror:
+          enabled: false
+          payloadLimitBytes: 1048576    # 1 MiB per-chunk cap (CLAUDE.md invariant #6)
+          outputPath: ''                # empty → derives from collector.localOutputPath

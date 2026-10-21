@@ -1,0 +1,65 @@
+# Double-safety net for `npm pack`. The `files` field in package.json is
+# the primary allowlist; this file is a defence-in-depth deny list so
+# that an accidental `files` field edit (e.g. switching to a glob like
+# `lib/**` instead of `lib/**/*.js`) does NOT silently ship the wrong
+# payload to the marketplace.
+#
+# Precedence (npm): anything matched by `package.json#files` CANNOT be
+# excluded from here — `files` wins. So these rules only bite when a path
+# is NOT already named in `files`, and they can never subtract from a path
+# that is. Do not list a path under both: the deny line is a silent no-op
+# and it makes this file look stricter than it is.
+
+# Source — never published; lib/ holds the compiled output.
+src/
+
+# Tests + fixtures — never published.
+tests/
+
+# Local install artifacts and build outputs that are NOT meant for npm.
+# NOTE: `lib/` is deliberately absent — `files` allowlists `lib/**/*.js`
+# and `lib/types/**/*.d.ts`, and `files` overrides this file, so a `lib/`
+# line here would be inert while implying the opposite. Source maps stay
+# excluded by the `**/*.js.map` rule at the bottom.
+install/
+tsconfig.json
+tsconfig.client.tsbuildinfo
+tsconfig.tsbuildinfo
+vitest.config.ts
+.github/
+.gitlab-ci.yml
+
+# Local-only helper scripts and dev-time verification scripts.
+# The release-facing scripts (inspect-events / check-readme-sync /
+# stress-spl-interactive) are explicitly listed in package.json#files, so
+# they are NOT excluded here. Everything else in scripts/ (prepare /
+# build-client / verify-*) is developer-only.
+scripts/build-client.mjs
+scripts/prepare.mjs
+scripts/formalName.mjs
+scripts/eval-spl-accuracy-fp.mjs
+scripts/spl-eval-corpus.mjs
+scripts/verify-artifacts.mjs
+scripts/verify-self-contained.mjs
+scripts/verify-spl-block-code-detector.mjs
+scripts/verify-test-cases-coverage.mjs
+
+# Claude Code / AI-agent local state.
+.claude/
+.ccgui/
+AGENTS.md
+CLAUDE.md
+
+# Build-tool / lockfile noise that is not the published artefact.
+node_modules/
+*.log
+*.tgz
+pnpm-lock.yaml
+package-lock.json
+
+# Source maps — never ship. They disclose `src/` paths to the
+# consumer. If a stack trace is needed in production, upload to a
+# service (Sentry / source-map-uploader) out of band.
+**/*.js.map
+**/*.d.ts.map
+**/*.mjs.map
