@@ -4,6 +4,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PolicyWatcher, expandWatchPaths } from '../src/utils/policyWatcher.js'
 
+/**
+ * Poll until `predicate` holds, or the deadline passes. Replaces fixed
+ * sleeps: at pollIntervalMs=100 a 250ms wait leaves only two poll cycles,
+ * which the windows-latest runner does not reliably honour (timer
+ * scheduling latency on top of coarser statSync().mtimeMs granularity).
+ * The first test below already waits 1300ms for exactly this reason.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  return predicate()
+}
+
 describe('PolicyWatcher ( HMR)', () => {
   let tmpDir: string
 
@@ -43,9 +59,9 @@ describe('PolicyWatcher ( HMR)', () => {
     watcher.subscribe((e) => events.push({ path: e.path, reason: e.reason }))
     watcher.start()
     writeFileSync(file, '{"apiVersion":"security.use/v2","kind":"Policy","rules":[{"id":"r1"}]}')
-    await new Promise((r) => setTimeout(r, 250))
+    const fired = await waitFor(() => events.some((e) => e.reason === 'change'))
     watcher.close()
-    expect(events.some((e) => e.reason === 'change')).toBe(true)
+    expect(fired).toBe(true)
   })
 
   it('fires on file deletion (rename)', async () => {
@@ -91,9 +107,9 @@ describe('PolicyWatcher ( HMR)', () => {
     })
     watcher.start()
     writeFileSync(file, '{} // touched')
-    await new Promise((r) => setTimeout(r, 250))
+    const fired = await waitFor(() => otherCalled > 0)
     watcher.close()
-    expect(otherCalled).toBeGreaterThan(0)
+    expect(fired).toBe(true)
   })
 
   it('expandWatchPaths returns file + dir pairs', () => {

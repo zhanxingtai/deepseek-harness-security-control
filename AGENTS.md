@@ -89,5 +89,5 @@ git config core.hooksPath scripts/git-hooks
 ## 6. 已知事项
 
 - **macOS 软链隐患（未修）**：`SensitivePathGuard` 对候选路径做 realpath、但 HOME 根用词法形式（`src/utils/policy/expandHome.ts`）。当 HOME 位于软链之后（macOS `/var` → `/private/var`）时，symlink 绕过防护匹配失效，`tests/sensitivePathGuard.test.ts` 的软链用例在 macOS runner 上会挂。修复方向：HOME 侧同样 realpath（或编译模式时生成 HOME 的 realpath 变体）。
-- **CI 平台差异**：`governance-package.yml` 在 ubuntu/macos/windows 三平台跑全量 vitest；`ci.yml` 在 ubuntu 跑 node 22/24 矩阵。测试写临时目录路径断言时，以 `realpathSync.native` 为基准，不要用词法路径（macOS/Windows 上两者可能不同）。
+- **CI 平台差异**：`ci.yml` 单文件承载全部闸口——`linux-package` 在 ubuntu 跑 node 22/24 矩阵，`macos-package` / `windows-package` 各自跑全量 vitest 并产出真实 tgz。测试写临时目录路径断言时，以 `realpathSync.native` 为基准，不要用词法路径（macOS/Windows 上两者可能不同）。另注意 `fs.watch` / `statSync().mtimeMs` 轮询类断言不要用固定 sleep：Windows runner 上 100ms 轮询周期下 250ms 的等待只有两个周期余量，用条件等待代替。
 - 事件落盘为**同步**写入（`src/utils/events/cappedNdjson.ts`），不存在异步排空问题；但自定义 sink 测试若在 afterEach `rmSync` 前不 `shutdown()`，interval 计时器可能重建临时目录（垃圾文件，不致失败）。

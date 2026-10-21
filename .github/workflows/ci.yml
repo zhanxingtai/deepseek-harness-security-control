@@ -1,5 +1,30 @@
 name: CI
 
+# 2026-10-21: merged the former ci.yml + governance-package.yml into one
+# workflow. Job names follow the sibling openclaw-security-control convention
+# (linux-package / macos-package / windows-package) so a red leg is
+# self-explanatory in the Actions UI instead of reading as `package (windows)`.
+#
+# What changed, and why:
+#   - `build-and-test` → `linux-package`. It absorbs governance-package's
+#     ubuntu leg, which was a verbatim duplicate (same `pnpm test`, same node
+#     22, same install).
+#   - `package` matrix [ubuntu, macos, windows] → `linux-package` (carrying the
+#     node 22/24 matrix) + `macos-package` + `windows-package`.
+#   - `pnpm verify` split into its 7 underlying gates as individually named
+#     steps. The old `&&` chain stopped at the first failure, so a red run said
+#     only that the chain broke, not which gate or why. Each gate name mirrors
+#     a `verify:*` script in package.json — the gate LIST is now duplicated
+#     between the two files, so a new gate must be added in both places.
+#
+# NOT changed: this file previously had no `tags:` filter, and still doesn't.
+# `release` gates itself on `github.ref_type == 'tag'`, so branch pushes run
+# every other job and skip packaging.
+#
+# ⚠ branch protection: `build-and-test` no longer exists as a job name. Any
+# required-status-check rule referencing it must be renamed to `linux-package`,
+# or PRs will block forever waiting on a check that can never report.
+
 on:
   push:
   pull_request:
@@ -8,8 +33,8 @@ on:
     # open PRs from `feature/*` etc. — excluding them only re-creates the
     # silent-CI failure mode this file previously had.
 
-# Default to least-privileged token; this workflow only checks out code
-# and runs tests — no write operations on the repo.
+# Default to least-privileged token. Only the `release` job widens this, and it
+# declares `contents: write` locally — no other job writes to the repo.
 permissions:
   contents: read
 
@@ -41,7 +66,9 @@ jobs:
             exit 1
           fi
 
-  build-and-test:
+  # Primary gate. Everything that can block a release runs here on ubuntu,
+  # across both supported Node majors.
+  linux-package:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -57,13 +84,17 @@ jobs:
         uses: pnpm/action-setup@v4
         with:
           # 2026-09-19: pin to 10.x. pnpm 11+ forces metadata-only fetches
-          # for peerDependencies during install; the @deepseek-ai/* peer
-          # deps are private npm packages (not on registry.npmjs.org) and
-          # pnpm 11 returns ERR_PNPM_FETCH_404 even with
-          # strict-peer-dependencies=false (see pnpm/pnpm#9490). The fix
+          # for peerDependencies during install, and pnpm 11 returns
+          # ERR_PNPM_FETCH_404 for deps outside the pnpm-10 happy path even
+          # with strict-peer-dependencies=false (see pnpm/pnpm#9490). The fix
           # landed only for some scenarios; the cleanest option is to stay
           # on 10 until pnpm exposes a proper skip-private-peer-metadata
           # npmrc key.
+          #
+          # ⚠ `auto-install-peers` in .npmrc MUST stay equal to
+          # `settings.autoInstallPeers` in pnpm-lock.yaml, or every
+          # `--frozen-lockfile` install below aborts with
+          # ERR_PNPM_LOCKFILE_CONFIG_MISMATCH before it fetches anything.
           version: 10
 
       - name: Setup Node.js ${{ matrix.node-version }}
@@ -90,24 +121,103 @@ jobs:
       - name: Test
         run: pnpm test
 
-      # Marketplace contract: 3-gate verification (self-contained + artifacts + readme-sync).
-      # Replaces pre-S5 `pnpm build:install` + install-bundle upload.
-      - name: Verify marketplace contract
-        run: pnpm verify
+      # Marketplace contract, one gate per step so a red run names the gate.
+      # Order and set must match the `verify` script in package.json.
+      - name: Verify self-contained
+        run: pnpm run verify:self-contained
+      - name: Verify artifacts
+        run: pnpm run verify:artifacts
+      - name: Verify README sync
+        run: pnpm run verify:readme-sync
+      - name: Verify action-type producers
+        run: pnpm run verify:action-type-producers
+      - name: Verify SPL block code
+        run: pnpm run verify:spl-block-code
+      - name: Verify test-case coverage
+        run: pnpm run verify:test-cases-coverage
+      - name: Verify self-protection
+        run: pnpm run verify:self-protection
 
       # Confirm the marketplace tarball packs cleanly (no warnings about missing
-      # peerDependencies / shadowed files). The tgz itself is not uploaded —
+      # peerDependencies / shadowed files). The tgz itself is not uploaded here —
       # marketplace nodes consume it via `pnpm dsh plugin add --source <tgz>`.
       - name: Verify marketplace tarball
         run: npm pack --dry-run
 
+  # macOS leg. Carries two things the ubuntu gate cannot:
+  #   1. real filesystem-semantics coverage — AGENTS.md §6 records an unfixed
+  #      SensitivePathGuard bug where HOME is compared lexically while candidate
+  #      paths are realpath'd, so the symlink-bypass case fails when HOME sits
+  #      behind a symlink (macOS /var → /private/var);
+  #   2. the only non-dry-run `npm pack`, so a tgz is downloadable from any push
+  #      without waiting for a tag.
+  macos-package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          # Must match `engines.node` (^22.19.0 || >=24.0.0); 20 was
+          # below the supported floor.
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      # Marketplace tarball — consumed by `pnpm dsh plugin add --source <tgz>`
+      # on marketplace nodes.
+      - name: Pack marketplace tarball
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: bash
+        run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sst-security-control-dsh-macos
+          path: sst-security-control-dsh-*.tgz
+          if-no-files-found: error
+
+  # Windows leg. `shell: bash` makes every `run:` step execute under Git Bash —
+  # on `windows-latest` this avoids cmd.exe's path/glob/quoting surprises and is
+  # the only way pnpm and npm reliably resolve on a fresh runner (Git for
+  # Windows puts bash at C:\Program Files\Git\bin).
+  windows-package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      # `NPM_CONFIG_SCRIPT_SHELL=bash` makes npm spawn prepack / pre-* /
+      # post-* hooks under bash on Windows. prepack invokes
+      # `bash scripts/verify-self-protection.sh`, which would otherwise
+      # fail under cmd.exe (no `bash` on PATH by default there).
+      - name: Pack marketplace tarball
+        env:
+          NPM_CONFIG_SCRIPT_SHELL: bash
+        run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sst-security-control-dsh-windows
+          path: sst-security-control-dsh-*.tgz
+          if-no-files-found: error
+
   # Publish the plugin tarball to GitHub Releases on any tag (no prefix
-  # requirement). The tarball
-  # is cross-platform (pure JS client + vendored assets), so a single
-  # ubuntu build publishes it; all gates must pass first.
+  # requirement). The tarball is cross-platform (pure JS client + vendored
+  # assets), so a single ubuntu build publishes it; all gates must pass first.
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [open-source-hygiene, build-and-test]
+    needs: [open-source-hygiene, linux-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

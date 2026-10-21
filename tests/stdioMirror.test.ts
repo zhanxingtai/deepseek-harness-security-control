@@ -17,6 +17,7 @@
 import { spawn } from 'node:child_process'
 import { promises as fsp, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MIRROR_ENV_VAR, parseWrapperArgv, runWrapper } from '../src/runtime/stdio-mirror.js'
@@ -493,7 +494,7 @@ describe('runWrapper — real fork', () => {
   let tmpDir: string
 
   beforeEach(async () => {
-    tmpDir = await fsp.mkdtemp('/tmp/dsh-stdio-mirror-test-')
+    tmpDir = await fsp.mkdtemp(join(tmpdir(), 'dsh-stdio-mirror-test-'))
   })
   afterEach(async () => {
     // Windows keeps a handle on files inside the temp dir for a short
