@@ -46,4 +46,10 @@ echo "[oss-sync] 3/3 推送 GitHub"
 git checkout "$OSS_BRANCH"
 git push "$GITHUB_REMOTE" "$OSS_BRANCH:main"
 
-echo "[oss-sync] 完成：$OSS_BRANCH -> $GITHUB_REMOTE/main"
+# End on the internal branch. Leaving the session on github-main means the
+# next `git commit` in the working tree hits the pre-commit identity guard
+# (correctly refusing a private identity on the OSS line), and invites the
+# mistake of staging internal work onto the public branch.
+git checkout "$INTERNAL_BRANCH"
+
+echo "[oss-sync] 完成：$OSS_BRANCH -> $GITHUB_REMOTE/main，已回到 $INTERNAL_BRANCH"

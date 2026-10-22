@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync, appendFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, appendFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PolicyWatcher, expandWatchPaths } from '../src/utils/policyWatcher.js'
@@ -18,6 +18,25 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<boo
     await new Promise((r) => setTimeout(r, 50))
   }
   return predicate()
+}
+
+/**
+ * Push a file's mtime decisively forward.
+ *
+ * `PolicyWatcher` detects change by comparing `statSync().mtimeMs` between
+ * polls, so a case that writes-then-waits is really asserting two things:
+ * that the watcher fires, and that the filesystem recorded a new timestamp.
+ * The second half is not portable — two writes inside one clock tick share a
+ * timestamp bucket on the windows-latest runner, and on coarse-granularity
+ * filesystems (containers, some CI volumes) the delta is literally 0ms. Pin
+ * mtime and the case tests only the watcher.
+ *
+ * +2s rather than +0s: a filesystem that truncates timestamps to whole
+ * seconds would round `Date.now()` back onto the seeded value.
+ */
+function touch(file: string): void {
+  const ahead = new Date(Date.now() + 2000)
+  utimesSync(file, ahead, ahead)
 }
 
 describe('PolicyWatcher ( HMR)', () => {
@@ -44,6 +63,7 @@ describe('PolicyWatcher ( HMR)', () => {
     // covered by separate tests below.
     watcher.__forcePollMode()
     appendFileSync(file, '\n// touched')
+    touch(file)
     // Polling cadence is 1000ms by default — wait a bit longer.
     await new Promise((r) => setTimeout(r, 1300))
     watcher.close()
@@ -59,6 +79,7 @@ describe('PolicyWatcher ( HMR)', () => {
     watcher.subscribe((e) => events.push({ path: e.path, reason: e.reason }))
     watcher.start()
     writeFileSync(file, '{"apiVersion":"security.use/v2","kind":"Policy","rules":[{"id":"r1"}]}')
+    touch(file)
     const fired = await waitFor(() => events.some((e) => e.reason === 'change'))
     watcher.close()
     expect(fired).toBe(true)
@@ -107,6 +128,12 @@ describe('PolicyWatcher ( HMR)', () => {
     })
     watcher.start()
     writeFileSync(file, '{} // touched')
+    // Pin mtime forward explicitly. The watcher detects change via
+    // statSync().mtimeMs, and on the windows-latest runner two writes inside
+    // the same clock tick land in one timestamp bucket — mtimeMs is then
+    // unchanged, no amount of waiting detects anything, and the case fails
+    // for reasons that have nothing to do with listener isolation.
+    touch(file)
     const fired = await waitFor(() => otherCalled > 0)
     watcher.close()
     expect(fired).toBe(true)

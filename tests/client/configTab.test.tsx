@@ -254,6 +254,22 @@ function renderConfig(bridge: SecurityMonitorBridge): ReturnType<typeof render> 
 }
 
 /**
+ * Toolbar queries use `findByRole`, never `getByRole`.
+ *
+ * `await waitFor(() => expect(bridge.getConfig).toHaveBeenCalled())` only
+ * proves the request went out. Config is still on its `state.kind ===
+ * 'loading'` branch then — which renders a banner, not the toolbar — and one
+ * Promise resolution + setState render stands between the two. A bare
+ * `getByRole` races that window and throws "unable to find role=button" on a
+ * slower runner; it is not reproducible on a fast local machine, so it only
+ * surfaces in CI. `findByRole` waits for the toolbar to mount instead.
+ *
+ * The two `getByRole` calls on the alert are correct as written: they sit
+ * inside, and immediately after, a `waitFor` that already asserts the alert
+ * exists.
+ */
+
+/**
  * The Config component debounces `validateConfigPatch` at 500ms.
  * Tests that need to step past that boundary wait the same window
  * in real time (the tests run in ~10ms otherwise). We always pass
@@ -418,7 +434,7 @@ describe('Config tab', () => {
     await waitFor(() => {
       expect(bridge.getConfig).toHaveBeenCalledTimes(1)
     })
-    const reloadButton = screen.getByRole('button', { name: locales.en.config_reload })
+    const reloadButton = await screen.findByRole('button', { name: locales.en.config_reload })
     fireEvent.click(reloadButton)
     await waitFor(() => {
       expect(bridge.getConfig).toHaveBeenCalledTimes(2)
@@ -509,7 +525,7 @@ describe('Config form', () => {
       ).toBeTruthy()
     })
 
-    const saveButton = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const saveButton = await screen.findByRole('button', { name: locales.en.config_save_draft })
     expect((saveButton as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -544,7 +560,7 @@ describe('Config form', () => {
     })
 
     // Click Save Draft — the dialog should pop, NOT the save.
-    const saveButton = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const saveButton = await screen.findByRole('button', { name: locales.en.config_save_draft })
     fireEvent.click(saveButton)
 
     await waitFor(() => {
@@ -586,7 +602,7 @@ describe('Config form', () => {
     await flushDebounce()
 
     // Click Save Draft — clean validation goes straight through.
-    const saveButton = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const saveButton = await screen.findByRole('button', { name: locales.en.config_save_draft })
     fireEvent.click(saveButton)
 
     // onSave re-triggers validation when validation === null (first Save
@@ -650,7 +666,7 @@ describe('Config form', () => {
     await flushDebounce()
     // Validation came back clean (default mock) — no warnings, no
     // errors. Save must STILL open the danger dialog.
-    const saveButton = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const saveButton = await screen.findByRole('button', { name: locales.en.config_save_draft })
     fireEvent.click(saveButton)
 
     // onSave re-triggers validation when validation === null.
@@ -666,7 +682,7 @@ describe('Config form', () => {
     expect(mocks.saveConfigDraft).not.toHaveBeenCalled()
 
     // Cancel — dialog closes, still no save, draft preserved.
-    const cancelButton = screen.getByRole('button', {
+    const cancelButton = await screen.findByRole('button', {
       name: locales.en.config_confirm_save_with_warnings_cancel,
     })
     fireEvent.click(cancelButton)
@@ -677,7 +693,7 @@ describe('Config form', () => {
 
     // Save again + confirm → the draft lands exactly once.
     // The danger dialog is already open; onConfirmSave proceeds directly.
-    fireEvent.click(screen.getByRole('button', { name: locales.en.config_save_draft }))
+    fireEvent.click(await screen.findByRole('button', { name: locales.en.config_save_draft }))
     await waitFor(() => {
       expect(
         screen.getByText(locales.en.config_confirm_danger_title),
@@ -715,7 +731,7 @@ describe('Config form', () => {
 
     await flushDebounce()
 
-    fireEvent.click(screen.getByRole('button', { name: locales.en.config_save_draft }))
+    fireEvent.click(await screen.findByRole('button', { name: locales.en.config_save_draft }))
     await waitFor(() => {
       expect(
         screen.getByText(locales.en.config_confirm_danger_title),
@@ -731,11 +747,11 @@ describe('Config form', () => {
     await waitFor(() => {
       expect(bridge.getConfig).toHaveBeenCalled()
     })
-    const undo = screen.getByRole('button', { name: locales.en.config_undo })
+    const undo = await screen.findByRole('button', { name: locales.en.config_undo })
     // 2026-10-10 — Copy JSON label now resolves via the shared
     // `copy` key (collapsed from `config_copy_json`).
-    const copy = screen.getByRole('button', { name: locales.en.copy })
-    const save = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const copy = await screen.findByRole('button', { name: locales.en.copy })
+    const save = await screen.findByRole('button', { name: locales.en.config_save_draft })
     expect(undo.className).toContain('dsh-secmon-button--success')
     expect(copy.className).toContain('dsh-secmon-button--success')
     expect(save.className).toContain('dsh-secmon-button--primary')
@@ -772,7 +788,7 @@ describe('Config form', () => {
 
     await flushDebounce()
 
-    fireEvent.click(screen.getByRole('button', { name: locales.en.config_save_draft }))
+    fireEvent.click(await screen.findByRole('button', { name: locales.en.config_save_draft }))
     await waitFor(() => {
       // mode is already enforce (snapshot baseline), so this saves
       // cleanly without a danger dialog. The test below separately
@@ -816,7 +832,7 @@ describe('Config form', () => {
 
     await flushDebounce()
 
-    fireEvent.click(screen.getByRole('button', { name: locales.en.config_save_draft }))
+    fireEvent.click(await screen.findByRole('button', { name: locales.en.config_save_draft }))
     await waitFor(() => {
       expect(screen.getByText(locales.en.config_confirm_danger_title)).toBeTruthy()
     })
@@ -847,7 +863,7 @@ describe('Config form', () => {
     })
     await flushDebounce()
 
-    const saveButton = screen.getByRole('button', { name: locales.en.config_save_draft })
+    const saveButton = await screen.findByRole('button', { name: locales.en.config_save_draft })
     expect((saveButton as HTMLButtonElement).disabled).toBe(true)
     // Clicking anyway must not call saveConfigDraft (button is
     // disabled, but we also verify the call count is still 0).
@@ -879,7 +895,11 @@ describe('Config form', () => {
       await waitFor(() => {
         expect(bridge.getConfig).toHaveBeenCalled()
       })
-      fireEvent.click(screen.getByRole('button', { name: locales.en.copy }))
+      // `getConfig` being called only means the request went out — the
+      // component is still on its `state.kind === 'loading'` branch, which
+      // renders a banner instead of the toolbar. findByRole waits for the
+      // toolbar to mount; getByRole raced it and threw on slower runners.
+      fireEvent.click(await screen.findByRole('button', { name: locales.en.copy }))
       await waitFor(() => {
         expect(writeText).toHaveBeenCalled()
       })

@@ -1104,9 +1104,11 @@ describe('runWrapper — real fork', () => {
     })
 
     it('wrapper /proc/<pid>/cmdline carries no trace of the child env (2026-09-29 regression)', async () => {
-      // No /proc on Windows — the leak vector being pinned here is the
-      // Linux world-readable cmdline.
-      if (process.platform === 'win32') return
+      // The leak vector being pinned here is the Linux world-readable
+      // cmdline. /proc is absent on macOS and Windows alike, so probe for
+      // the file rather than sniffing the platform — that keeps the
+      // assertion running under WSL, which does have /proc.
+      if (process.platform === 'win32' || !existsSync('/proc/self/cmdline')) return
       const secret = 'dsh-e2e-secret-' + 'k'.repeat(24)
       const outputPath = join(tmpDir, 'mirror.jsonl')
       const statusPath = join(tmpDir, 'status.json')

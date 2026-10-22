@@ -296,6 +296,29 @@ function compilePattern(raw: string): CompiledPathPattern | null {
  * a `~/.ssh/` pattern match `${HOME}/.ssh/...`, `/root/.ssh/...`, and
  * `/home/<user>/.ssh/...` candidates with a single source entry.
  */
+/**
+ * `$HOME`-rooted prefixes for `<rest>`, in both the verbatim and realpath'd
+ * form.
+ *
+ * Candidate paths are realpath'd before matching, but `$HOME` was used
+ * verbatim. On macOS the default HOME sits under `/var` → `/private/var`, so
+ * the deny-list side kept `/var/...` while the candidate side had already
+ * become `/private/var/...` — the two never lined up, and a symlink pointing
+ * at `~/.ssh/id_rsa` passed the guard untouched. Emitting both forms closes
+ * that gap.
+ *
+ * Additive on purpose: for a deny-list an extra variant can only block more,
+ * never fewer. Since `resolveSymlink(home)` is the same directory reached by
+ * a longer route, every path it adds was already logically under `$HOME`.
+ */
+function homeRestVariants(rest: string): string[] {
+  const home = homeDir()
+  const out = [`${home}/${rest}`]
+  const real = resolveSymlink(home)
+  if (real !== home) out.push(`${real}/${rest}`)
+  return out
+}
+
 function homeVariantsFor(raw: string, expanded: string): string[] {
   if (!raw.startsWith('~')) return [expanded]
   // Bare `~` or `~/...` (current user): primary + secondary variants
@@ -304,7 +327,7 @@ function homeVariantsFor(raw: string, expanded: string): string[] {
     const slash = raw.indexOf('/')
     const rest = raw.slice(slash + 1) // strip leading `/`; '' for bare `~`
     if (!rest) return [expanded]
-    const variants: string[] = [`${homeDir()}/${rest}`]
+    const variants: string[] = homeRestVariants(rest)
     if (process.platform === 'darwin') {
       variants.push(`/Users/<user>/${rest}`)
     } else {
@@ -319,7 +342,7 @@ function homeVariantsFor(raw: string, expanded: string): string[] {
   const user = raw.slice(1, slash)
   const rest = raw.slice(slash + 1)
   if (!user || user === '~') return [expanded]
-  const variants: string[] = [`${homeDir()}/${rest}`]
+  const variants: string[] = homeRestVariants(rest)
   if (process.platform === 'darwin') {
     variants.push(`/Users/<user>/${rest}`)
   } else {
