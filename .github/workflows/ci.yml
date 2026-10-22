@@ -248,7 +248,11 @@ jobs:
       - name: Pack tarball
         run: |
           mkdir -p install
-          pnpm pack
+          # `pnpm run pack`, not `pnpm pack` — pnpm's built-in `pack` ignores
+          # --pack-destination and writes the tgz to the cwd. The npm script
+          # named "pack" runs `npm pack --pack-destination install`, which is
+          # what we actually want.
+          pnpm run pack
 
       - name: Rename tarball with tag
         run: |

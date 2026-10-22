@@ -18,7 +18,10 @@ pnpm install --frozen-lockfile
 pnpm build        # tsc -b + node scripts/build-client.mjs（产物在 lib/，被 gitignore）
 pnpm test         # pretest 会自动先跑 build，再 vitest run
 pnpm verify       # 7 个 verify 门（见 §4），全过才算可打包
-pnpm pack         # npm pack --pack-destination install（产物 install/*.tgz，被 gitignore）
+pnpm run pack     # npm pack --pack-destination install（产物 install/*.tgz，被 gitignore）
+                   # 注意：**必须** `pnpm run pack`，裸 `pnpm pack` 是 pnpm 内置命令，不认
+                   # --pack-destination，会把产物丢到 cwd。这是历史上 release job 一直
+                   # 打包失败的根因——CI 第一次执行到这里才暴露。
 ```
 
 `prepack` 钩子会自动重跑 prepare + 全部 verify 门——**手动 `npm pack` 也绕不过验收**。
@@ -49,7 +52,8 @@ pnpm pack         # npm pack --pack-destination install（产物 install/*.tgz�
 | `pnpm build` | tsc -b + 前端 client 构建 → `lib/` |
 | `pnpm test` | build（pretest）+ vitest run |
 | `pnpm verify` | 7 门：self-contained / artifacts / readme-sync / action-type-producers / spl-block-code / test-cases-coverage / self-protection |
-| `pnpm pack` | npm pack → `install/*.tgz`（prepack 自动过门） |
+| `pnpm run pack` | npm pack → `install/*.tgz`（prepack 自动过门） |
+| `pnpm pack`（不要用） | pnpm 内置命令，绕开上一条，产物落到 cwd |
 | `bash scripts/oss-sync.sh "msg" <branch>` | OSS 发版同步（见 §5，分支名必填） |
 
 ## 5. OSS 分支维护（github-main，强制）

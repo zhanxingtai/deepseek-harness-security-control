@@ -207,7 +207,13 @@ describe('evaluateSensitivePathGuard — symlink-aliasing bypass', () => {
     // The audit_details.resolved_path is the realpath that fired the
     // deny-list — confirms the symlink bypass was closed (the literal
     // symlink name did NOT match; the resolved realpath did).
-    expect(decision!.audit_details?.resolved_path).toBe(join(tmpRoot, '.ssh', 'id_rsa'))
+    //
+    // Compare against the resolved form of the target, not the literal
+    // tmpRoot: on macOS os.tmpdir() returns /var/folders/…, which is a
+    // symlink to /private/var/folders/…, so the guard reports the latter.
+    expect(decision!.audit_details?.resolved_path).toBe(
+      resolveSymlink(join(tmpRoot, '.ssh', 'id_rsa')),
+    )
   })
 
   it('blocks a literal innocent-name path that symlinks to ~/.aws/credentials', () => {
