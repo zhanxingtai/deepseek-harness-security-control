@@ -88,6 +88,7 @@ pnpm dsh plugin --profile web remove sst-security-control-dsh
 
 - 官网：[https://www.zhihuizhanxing.com](https://www.zhihuizhanxing.com)
 - 源码：[https://github.com/zhanxingtai/deepseek-harness-security-control](https://github.com/zhanxingtai/deepseek-harness-security-control)
+- X（Twitter）：[@StarSightTec](https://x.com/StarSightTec)
 - 微信公众号：
 
   ![微信公众号](assets/wechat-mp-qr.jpg)

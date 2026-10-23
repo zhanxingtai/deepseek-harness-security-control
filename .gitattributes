@@ -40,7 +40,6 @@
 #   cordis.patch.yml    — the marketplace PatchOptions contract
 #   *.mjs               — inspect-events / check-readme-sync /
 #                         stress-spl-interactive ship as scripts/
-#   LICENSE             — extensionless, hence the explicit name
 #
 # `*.js` is deliberately absent: `lib/` is the tsc outDir and is gitignored,
 # so no tracked .js exists and a rule for it would be dead config. The
@@ -48,7 +47,13 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 *.mjs text eol=lf
-LICENSE text eol=lf
+
+# Anchored to the repo root on purpose. A bare `LICENSE` pattern matches at
+# any depth, so it would also catch a vendored `vendor/*/LICENSE` — those are
+# verbatim copies from an upstream SDK and are stored CRLF; renormalising one
+# would desync the vendored blob from upstream. The enterprise line vendors
+# such a LICENSE today, so keep this anchored when the two lines converge.
+/LICENSE text eol=lf
 
 # git hooks (extensionless) must stay LF: CRLF breaks bash hook execution on Windows
 scripts/git-hooks/* text eol=lf

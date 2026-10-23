@@ -88,6 +88,7 @@ Events are NDJSON lines, validated by `src/utils/schema.ts`. Event types include
 
 - Website: [https://www.zhihuizhanxing.com](https://www.zhihuizhanxing.com)
 - Source: [https://github.com/zhanxingtai/deepseek-harness-security-control](https://github.com/zhanxingtai/deepseek-harness-security-control)
+- X: [@StarSightTec](https://x.com/StarSightTec)
 - WeChat Official Account:
 
   ![WeChat Official Account](assets/wechat-mp-qr.jpg)
