@@ -15,8 +15,21 @@
  * use a simple `t(key)` lookup. Nested objects would force the locale
  * registry to flatten and lose the per-key fallback chain.
  */
+import {
+  REASON_EN,
+  REASON_LITERAL_EN,
+  REASON_LITERAL_ZH,
+  REASON_ZH,
+} from './reasons.js'
+
 const en = {
   nav: 'SST Security Control',
+  // Reason-column copy (one key per SPL rule + engine literals). Spreading
+  // them in here means `LocaleKey` derives from `en` and the en↔zh parity
+  // test below covers them with no extra wiring. See reasons.ts for why
+  // the column needs translating at all.
+  ...REASON_EN,
+  ...REASON_LITERAL_EN,
   // Tab strip: Metrics / Event Stream / Top Blocks / Config.
   tab_metrics: 'Metrics',
   tab_event_stream: 'Event Stream',
@@ -200,6 +213,10 @@ const en = {
   copy: 'Copy',
   copy_ok: 'Copied to clipboard.',
   copy_fail: 'Copy failed: {error}',
+  // Reason detail passed into `copy_fail`. Was a hardcoded English
+  // literal at 3 call sites (Config / Events / RecentBlocks), which
+  // leaked English into the zh UI.
+  copy_clipboard_unavailable: 'clipboard unavailable',
   config_section_count: '{n} items',
   config_on: 'on',
   config_off: 'off',
@@ -313,11 +330,13 @@ const en = {
 
 const zh = {
   nav: 'SST Security Control',
-  // 四页:Metrics / Event Stream / Top Blocks / Config。
-  tab_metrics: 'Metrics',
-  tab_event_stream: 'Event Stream',
-  tab_top_blocks: 'Policy Hits',
-  tab_config: 'Config',
+  ...REASON_ZH,
+  ...REASON_LITERAL_ZH,
+  // 四页:统计 / 事件 / 威胁 / 配置。
+  tab_metrics: '统计',
+  tab_event_stream: '事件',
+  tab_top_blocks: '威胁',
+  tab_config: '配置',
   loading: '加载中…',
   load_error: '加载安全监控数据失败。宿主插件可能未运行。',
   reload: '重载策略',
@@ -489,10 +508,11 @@ const zh = {
   copy: '复制',
   copy_ok: '已复制到剪贴板。',
   copy_fail: '复制失败:{error}',
+  copy_clipboard_unavailable: '剪贴板不可用',
   config_section_count: '{n} 项',
   config_on: '开启',
   config_off: '关闭',
-  config_danger_badge: '⚠ danger',
+  config_danger_badge: '⚠ 危险',
   config_confirm_danger_title: '确认危险修改?',
   config_confirm_danger_body: '本次草稿包含以下危险设置:',
   config_field_danger_mode: "mode = 'enforce' — 被拦截的工具调用将被拒绝。",

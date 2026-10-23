@@ -17,6 +17,8 @@ import type { LocaleKey } from '../locales.js'
 import type { PollingContext } from '../usePolling.js'
 import { prettyRawJson } from './Events.js'
 import { Card, Table, Banner, Badge, IconButton, type IconButtonIcon, type BadgeTone, type TableColumn } from './primitives.js'
+import { formatTime } from '../formatTime.js'
+import { localizeReason } from '../reasons.js'
 
 const LIMIT_OPTIONS = [20, 50, 100] as const
 type Limit = (typeof LIMIT_OPTIONS)[number]
@@ -438,7 +440,7 @@ export function RecentBlocks({ bridge, t, polling, pollingPausedRef }: RecentBlo
           applyStatus('fail', detail)
         })
     } else {
-      applyStatus('fail', 'clipboard unavailable')
+      applyStatus('fail', t('copy_clipboard_unavailable'))
     }
   }
 
@@ -518,10 +520,18 @@ export function RecentBlocks({ bridge, t, polling, pollingPausedRef }: RecentBlo
     {
       key: 'reason',
       header: t('recent_row_reason'),
-      render: (row) =>
-        (row as BlockRow).block_reason ??
-        (row as BlockRow).decision_internal ??
-        (row as BlockRow).decision,
+      render: (row) => {
+        const b = row as BlockRow
+        // block_reason is a runtime-composed English sentence wrapped around
+        // Chinese rule text (DecisionComposer.buildReason), so it reads wrong
+        // in both languages. Prefer the per-policy_id copy; fall back to the
+        // raw chain when nothing is registered (older policy, unseen engine
+        // literal) so the column never goes blank.
+        const localized = localizeReason(b.policy_id, b.block_reason, t)
+        return localized !== ''
+          ? localized
+          : (b.block_reason ?? b.decision_internal ?? b.decision)
+      },
     },
   ]
 
@@ -658,13 +668,4 @@ export function RecentBlocks({ bridge, t, polling, pollingPausedRef }: RecentBlo
       ),
     ),
   )
-}
-
-function formatTime(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '—'
-  try {
-    return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
-  } catch {
-    return String(ms)
-  }
 }

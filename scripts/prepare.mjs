@@ -3,6 +3,8 @@
  * prepare.mjs — marketplace bundle prep script.
  *
  * 2026-09-18 S11: pre-publish pipeline that:
+ *  0. Wipes the `tsc` outDir first, so output orphaned by a deleted source
+ *     dir can never be packed (see the step-0 comment for the incident).
  *  1. Runs `tsc -b` to produce lib/ (TypeScript → ESM JavaScript + .d.ts).
  *  2. Validates the marketplace metadata block (`dsh`, `dshWorkshop`,
  *     `engines`, `peerDependencies`).
@@ -20,7 +22,7 @@
  * publish flow (S13) calls this script before `pnpm pack`.
  */
 import { execSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deriveFormalName } from './formalName.mjs'
@@ -44,6 +46,37 @@ function fail(msg) {
 function step(label) {
   console.log(`▶ ${label}`)
 }
+
+// `tsc` emits here. Read it rather than hardcoding so the clean below can
+// never drift from the compiler if `outDir` is ever changed — a stale-clean
+// guard that silently misses is worse than no guard at all.
+const TSC_OUT_DIR =
+  (readFileSync(join(root, 'tsconfig.json'), 'utf8')
+    .match(/"outDir"\s*:\s*"([^"]+)"/)?.[1] ?? './lib')
+    .replace(/^\.\//, '')
+
+// 0. Wipe the tsc output dir before building.
+//
+//    `tsc -b` is incremental and never removes output for a source file that
+//    no longer exists, and `lib/` is gitignored (`.gitignore:4`) so nothing
+//    else prunes it. A deleted source directory therefore leaves its compiled
+//    output behind, and `npm pack` ships whatever is sitting in `lib/`.
+//
+//    Observed 2026-10-22: `7ce8af8 refactor(s5): strip platform-locked
+//    modules for marketplace form (#3)` deleted `src/governance/`, but 9
+//    orphaned `lib/governance/*.js` (+9 `.d.ts`, ~70 KB) from a prior
+//    dsh-sdk checkout rode along in the open-source tarball — dead code
+//    (nothing imports it, not even `lib/index.js`) that contradicts the
+//    point of the s5 strip. Wiping first makes "an orphan cannot ship"
+//    structural instead of a thing to remember to audit.
+//
+//    Safe to wipe: every artefact `package.json#files` expects from `lib/`
+//    is rebuilt below — 1a `tsc -b` (host) emits `lib/**` + `lib/types/**`,
+//    1b `build-client.mjs` writes `lib/client.js`, and step 3 writes
+//    `lib/marketplace.manifest.json`. This mirrors the existing
+//    `pnpm run clean` script (`rm -rf lib`).
+step(`Cleaning ${TSC_OUT_DIR}/ (stale-output guard)...`)
+rmSync(join(root, TSC_OUT_DIR), { recursive: true, force: true })
 
 // 1a. tsc -b (host: src → lib)
 step('Running tsc -b (host)...')
@@ -136,9 +169,9 @@ const formalName = deriveFormalName(pkg.version)
 //     src/client/section.tsx). Edit the static lists here when the source
 //     files change; verify-artifacts.mjs §12 catches drift.
 const tabLabels = {
-  overview: { en: 'Metrics', zh: '指标', description: '聚合指标 / 拦截数 / 规则加载数 / 运行时长' },
-  events: { en: 'Event Stream', zh: '事件流', description: '本地 NDJSON 原始事件浏览 / 过滤' },
-  recent: { en: 'Top Blocks', zh: '阻断记录', description: '最近 N 条 SPL block 决策，最新在前' },
+  overview: { en: 'Metrics', zh: '统计', description: '聚合指标 / 拦截数 / 规则加载数 / 运行时长' },
+  events: { en: 'Event Stream', zh: '事件', description: '本地 NDJSON 原始事件浏览 / 过滤' },
+  recent: { en: 'Policy Hits', zh: '威胁', description: '最近 N 条 SPL block 决策，最新在前' },
   config: { en: 'Config', zh: '配置', description: '当前生效 Config 快照 + 实时编辑 + Draft / LivePatch' },
 }
 const uiHints = {
@@ -152,8 +185,11 @@ const uiHints = {
   'runtimeHooks.enabledAtSubprocess': { advanced: false },
   'runtimeHooks.blockAtSubprocess': { advanced: false },
   'collector.localOutputPath': { advanced: false },
-  // Tab 标签 — 与 src/client/section.tsx:139-143 的 4 Tab label 一一对应。
-  // marketplace detail page 渲染时如果 locale 加载失败，回退到这里的 label。
+  // Tab 标签 — 与 src/client/locales.ts 的 tab_metrics / tab_event_stream /
+  // tab_top_blocks / tab_config 四个 locale 键一一对应(应用内 UI 由 section.tsx
+  // 的 t() 取值,这里是 marketplace detail page 的静态回退)。
+  // verify-artifacts.mjs §12 只校验 label 非空,不做字面比对 —— 两处漂移不会
+  // 被门拦住,改任一处都要同步另一处。
   // 顶层 uiHints.tabs.security-monitor.label = 'SST Security Control'
   // 是单 Tab 形态；DSH 是 4 Tab 形态，key 是 plugin id 而非 security-monitor。
   tabs: Object.fromEntries(

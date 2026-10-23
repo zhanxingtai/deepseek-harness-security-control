@@ -133,6 +133,14 @@ describe('evaluateSensitivePathGuard — positive matches (deny-list fires)', ()
     // NFKC-collapses `／` → `/` and strips the ZWSP before the regex
     // runs, so the canonical ASCII form reaches the deny-list.
     { name:'~/.ssh/id_rsa with full-width slash + ZWSP', pattern:'~/.ssh/', ctx: makeCtx({ path:'~/​／.ssh​/id_rsa'}) },
+  // Windows system binaries. Added 2026-10-22 to close the direction the
+    // SPL rules already covered (`^C:\\Windows\\System32\\`) and the guard
+    // did not. The deny-list entry is separator-normalised because
+    // `toMatchPath()` only rewrites `\` → `/` on win32 — the backslash form
+    // below is what proves that normalisation actually runs.
+    { name:'C:\\Windows\\System32\\cmd.exe (backslash form)', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:\\Windows\\System32\\cmd.exe'}) },
+    { name:'C:/Windows/System32/drivers/etc/hosts', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:/Windows/System32/drivers/etc/hosts'}) },
+    { name:'C:/Windows/System32 (bare dir)', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:/Windows/System32'}) },
   ]
   it.each(POSITIVE_CASES)('$name', ({ ctx, pattern }) => {
     const decision = evaluateSensitivePathGuard(ctx, defaultCfg())
@@ -399,6 +407,12 @@ describe('evaluateSensitivePathGuard — negative matches (no block)', () => {
     { name: 'command without any path token', ctx: makeCtx({ command: 'echo hello world' }) },
     { name: 'empty params', ctx: makeCtx({}) },
     { name: 'disabled guard (enabled:false)', ctx: makeCtx({ path: '~/.ssh/id_rsa' }) },
+    // Appended after the disabled-guard case on purpose: the `it.each` below
+    // dispatches on `indexOf(...) === 4`, so new cases must not take slot 4.
+    // `System32x` is the segment-boundary trap — the pattern is a
+    // directoryPrefix, so it must not leak onto a sibling directory name.
+    { name: 'sibling dir C:/Windows/System32x/cmd.exe', ctx: makeCtx({ path: 'C:/Windows/System32x/cmd.exe' }) },
+    { name: 'non-sensitive file under C:/Program Files', ctx: makeCtx({ path: 'C:/Program Files/app/config.json' }) },
   ]
   it.each(NEGATIVE_CASES)('$name → null', ({ ctx }) => {
     const cfg = NEGATIVE_CASES.indexOf(NEGATIVE_CASES.find((c) => c.ctx === ctx)!) === 4

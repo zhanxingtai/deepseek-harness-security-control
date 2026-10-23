@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "sst-security-control-dsh-v1.0.0 安全监控插件",
+    "title": "sst-security-control-dsh-v1.0.1 安全监控插件",
     "description": "DeepSeek Harness security monitoring and runtime intervention plugin",
     "icon": "assets/logo.png",
     "homepage": "https://github.com/zhanxingtai/deepseek-harness-security-control",

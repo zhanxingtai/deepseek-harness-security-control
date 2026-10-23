@@ -33,6 +33,7 @@ import { InterventionEngine } from '../intervention/InterventionEngine.js'
 import type { DebugLog } from '../utils/debugLog.js'
 import type { Config } from '../config.js'
 import { tailNdjson, isBlockDecision } from '../utils/ndjsonTail.js'
+import { formatLocalIso } from '../utils/time.js'
 import {
   clampLimit,
   scanOverviewAggregates,
@@ -294,7 +295,7 @@ function renderBlocks(rows: BlockRow[], limit: number): string {
   if (rows.length === 0) return `no blocks found in last ${limit} events.`
   const header = `recent blocks: ${rows.length} (limit=${limit})`
   const body = rows.map((r) => {
-    const ts = new Date(r.ts).toISOString()
+    const ts = formatLocalIso(r.ts)
     const session = r.session_id ?? '-'
     const tool = r.tool_name ?? '-'
     const reason = r.block_reason ?? r.decision_internal ?? r.decision

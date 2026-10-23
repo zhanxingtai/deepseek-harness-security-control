@@ -82,8 +82,15 @@ function main() {
    *
    * Markers are OPTIONAL — without a marker, the script falls back to
    * a hard-coded required-section list per locale.
+   *
+   * `ui-cli` was dropped from `requiredIntents` on 2026-10-23: the READMEs
+   * no longer document the Control UI panel or the event-digest /
+   * rule-regression CLI scripts, so requiring an H2 for them only forced a
+   * section nobody wanted. It was already absent from the "Recognised
+   * intents" list above, which is why the two lists disagreed. Add the
+   * token back to both if that documentation returns.
    */
-  const requiredIntents = ['what-it-does', 'install', 'license', 'ui-cli']
+  const requiredIntents = ['what-it-does', 'install', 'license']
 
   let failures = 0
   for (const f of readmes) {

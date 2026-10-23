@@ -27,6 +27,7 @@ import type {
 import type { LocaleKey } from '../locales.js'
 import type { PollingContext } from '../usePolling.js'
 import { Card, Table, Banner, Badge, IconButton, type IconButtonIcon, type BadgeTone, type TableColumn } from './primitives.js'
+import { formatTime } from '../formatTime.js'
 
 // Fixed per-page cap. The wire clamps to
 // [1, 1000]; 50 matches the "limit 50 per page" hint.
@@ -559,7 +560,7 @@ export function Events({ bridge, t, polling, pollingPausedRef }: EventsProps): R
           applyStatus('fail', detail)
         })
     } else {
-      applyStatus('fail', 'clipboard unavailable')
+      applyStatus('fail', t('copy_clipboard_unavailable'))
     }
   }
 
@@ -831,13 +832,4 @@ export function Events({ bridge, t, polling, pollingPausedRef }: EventsProps): R
       ),
     ),
   )
-}
-
-function formatTime(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '—'
-  try {
-    return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
-  } catch {
-    return String(ms)
-  }
 }

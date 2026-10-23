@@ -1036,7 +1036,7 @@ function compileMatch(match: PolicyRule['match']): { clause: CompiledMatchClause
   return {
     clause: {
       actionType: actionTypeSet,
-      toolName: toSet(match.toolName),
+      toolName: toLowerSet(match.toolName),
       assetType: toSet(match.assetType),
       riskFlagsAny: toSet(match.riskFlagsAny),
       riskFlagsAll: toSet(match.riskFlagsAll),
@@ -1051,6 +1051,16 @@ function compileMatch(match: PolicyRule['match']): { clause: CompiledMatchClause
 function toSet(value: string[] | undefined): Set<string> | undefined {
   if (!value || value.length === 0) return undefined
   return new Set(value)
+}
+
+/**
+ * `toolName` 集合小写化后编译，使 `match.toolName` 大小写不敏感：
+ * 规则里写 `write` 即覆盖 `Write`。运行时同一动作的工具名大小写不定，
+ * 精确比较会让只列了 `edit` 的规则被 `Edit` 绕过。
+ */
+function toLowerSet(value: string[] | undefined): Set<string> | undefined {
+  if (!value || value.length === 0) return undefined
+  return new Set(value.map((v) => v.toLowerCase()))
 }
 
 /**

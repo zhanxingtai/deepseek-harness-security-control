@@ -1,7 +1,7 @@
 {
   "name": "sst-security-control-dsh",
   "description": "DeepSeek Harness security monitoring and runtime intervention plugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -32,6 +32,7 @@
     "scripts/check-readme-sync.mjs",
     "scripts/stress-spl-interactive.mjs",
     "README.md",
+    "README.zh.md",
     "LICENSE",
     "cordis.patch.yml"
   ],
@@ -84,13 +85,13 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/schemastery": "^3.0.0",
-    "@deepseek-ai/dsh-subprocess": ">=0.1.6-alpha.2 <0.2.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.1.6-alpha.2 <0.3.0",
     "yaml": ">=2.5.0 <3.0.0",
     "js-yaml": "^5.0.0",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc.2 <0.2.0",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.5-rc.2 <0.2.0",
-    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.2 <0.2.0",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.1.6-alpha.2 <0.2.0"
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.6-alpha.2 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

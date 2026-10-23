@@ -7,7 +7,9 @@ import { stripZeroWidthAndRtl } from './InlinePromptInjection.js'
  *
  * Semantics:
  * - actionType: any listed value matches (or absent = match all).
- * - toolName: any listed value matches; '*' is a wildcard.
+ * - toolName: any listed value matches, case-insensitively (rule list and
+ *   event value are both lowercased — see `toLowerSet` in RuleLoader);
+ *   '*' is a wildcard.
  * - riskFlagsAny: at least one listed flag must be present.
  * - riskFlagsAll: all listed flags must be present.
  * - paramsRegex: for every configured field, at least one regex must match the
@@ -72,7 +74,8 @@ function matchToolName(ctx: InterventionContext, m: CompiledMatchClause): boolea
   const toolName = ctx.toolName
   if (!toolName) return false
   if (m.toolName.has('*')) return true
-  return m.toolName.has(toolName)
+  // 规则侧集合已在编译期小写化（RuleLoader.toLowerSet）
+  return m.toolName.has(toolName.toLowerCase())
 }
 
 function matchRiskFlags(ctx: InterventionContext, m: CompiledMatchClause): boolean {

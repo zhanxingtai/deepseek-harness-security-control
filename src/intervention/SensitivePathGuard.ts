@@ -108,6 +108,15 @@ export const DEFAULT_SENSITIVE_PATHS: readonly string[] = [
   '/etc/sudoers',
   '/etc/sudoers.d/',
   '/etc/gshadow',
+  // Windows system binaries (cmd/powershell/reg live here). Written in
+  // separator-normalised form on purpose: `toMatchPath()` rewrites `\` → `/`
+  // only on win32, and POSIX treats a backslash as a legal filename char, so
+  // a `C:\...` literal could never match on Windows. Mirrors the SPL rules'
+  // `^C:\\Windows\\System32\\` (the pre-2026-10-22 direction — SPL had the
+  // Windows entry and the guard did not). Case-SENSITIVE by construction
+  // (`compilePattern` builds no `i` flag), so `c:/windows/system32` slips
+  // through; fixing that means changing the compiler, not the deny-list.
+  'C:/Windows/System32/',
   // Process environment + package manager state
   '/proc/*/environ',
   '/var/lib/dpkg/info/*',

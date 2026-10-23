@@ -340,7 +340,22 @@ describe('SecurityMonitorSection', () => {
     // columns: POLICY id (monospace) + REASON text + DECISION badge.
     expect(screen.getByText(/self-protection-block-harness-process-kill/)).toBeTruthy()
     expect(screen.getByText(/self-protection-block-disabler-script/)).toBeTruthy()
-    expect(screen.getByText('process kill attempt on harness')).toBeTruthy()
+    // REASON renders the per-policy_id localized copy, NOT the wire
+    // `block_reason`. The wire value is composed at runtime by
+    // DecisionComposer.buildReason as an English sentence wrapped around
+    // the Chinese rule text, so it read wrong in both languages; the
+    // mapping in src/client/reasons.ts replaces it wholesale. Asserting
+    // through `locales.en` keeps this in step with that table.
+    //
+    // Row 1's `policy_id` is a real SPL rule → mapped. Row 2's
+    // (`self-protection-block-disabler-script`) is NOT — the real id is
+    // `self-protection-block-write-disabler-script` — so it takes the
+    // fallback branch and still shows its wire reason. Both branches in
+    // one table.
+    expect(
+      screen.getByText(locales.en['reason_self-protection-block-harness-process-kill']),
+    ).toBeTruthy()
+    expect(screen.queryByText('process kill attempt on harness')).toBeNull()
     expect(screen.getByText('restarter disabler script')).toBeTruthy()
   })
 

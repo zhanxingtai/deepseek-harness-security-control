@@ -643,7 +643,7 @@ export function Config({ bridge, t }: ConfigProps): ReactNode {
             scheduleBannerClear()
           })
       } else {
-        setCopiedMessage(t('copy_fail', { error: 'clipboard unavailable' }))
+        setCopiedMessage(t('copy_fail', { error: t('copy_clipboard_unavailable') }))
         scheduleBannerClear()
       }
       return prev
