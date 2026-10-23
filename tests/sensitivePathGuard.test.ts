@@ -98,7 +98,7 @@ function makeCtx(params: Record<string, unknown>, body?: string): InterventionCo
 const HOME = process.env.HOME ?? '/root'
 
 describe('evaluateSensitivePathGuard — positive matches (deny-list fires)', () => {
-  const POSITIVE_CASES: Array<{ name: string; ctx: InterventionContext; pattern: string }> = [
+  const POSITIVE_CASES: Array<{ name: string; ctx: InterventionContext; pattern: string; win32Only?: boolean }> = [
     { name: '~/.ssh/id_rsa via params.path', pattern: '~/.ssh/id_rsa', ctx: makeCtx({ path: '~/.ssh/id_rsa' }) },
     { name: '~/.aws/credentials via params.file_path', pattern: '~/.aws/credentials', ctx: makeCtx({ file_path: '~/.aws/credentials' }) },
     { name: '/etc/shadow via params.path', pattern: '/etc/shadow', ctx: makeCtx({ path: '/etc/shadow' }) },
@@ -136,13 +136,23 @@ describe('evaluateSensitivePathGuard — positive matches (deny-list fires)', ()
   // Windows system binaries. Added 2026-10-22 to close the direction the
     // SPL rules already covered (`^C:\\Windows\\System32\\`) and the guard
     // did not. The deny-list entry is separator-normalised because
-    // `toMatchPath()` only rewrites `\` → `/` on win32 — the backslash form
-    // below is what proves that normalisation actually runs.
-    { name:'C:\\Windows\\System32\\cmd.exe (backslash form)', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:\\Windows\\System32\\cmd.exe'}) },
+    // `toMatchPath()` only rewrites `\` → `/` on win32.
+    //
+    // The backslash form is therefore win32-only: on POSIX a backslash is
+    // a legal filename character and MUST keep matching literally (see
+    // `toMatchPath`), so `C:\Windows\System32\cmd.exe` is an ordinary
+    // filename there and provably cannot match `C:/Windows/System32/`.
+    // Normalising it on POSIX would instead produce a false positive on a
+    // real file that happens to be named that, so the guard is correct as
+    // written and this case must not be expected to block off-Windows.
+    { name:'C:\\Windows\\System32\\cmd.exe (backslash form)', pattern:'C:/Windows/System32/', win32Only: true, ctx: makeCtx({ path:'C:\\Windows\\System32\\cmd.exe'}) },
     { name:'C:/Windows/System32/drivers/etc/hosts', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:/Windows/System32/drivers/etc/hosts'}) },
     { name:'C:/Windows/System32 (bare dir)', pattern:'C:/Windows/System32/', ctx: makeCtx({ path:'C:/Windows/System32'}) },
   ]
-  it.each(POSITIVE_CASES)('$name', ({ ctx, pattern }) => {
+  const isWindows = process.platform === 'win32'
+  const RUNNABLE_CASES = isWindows ? POSITIVE_CASES : POSITIVE_CASES.filter(c => !c.win32Only)
+
+  it.each(RUNNABLE_CASES)('$name', ({ ctx, pattern }) => {
     const decision = evaluateSensitivePathGuard(ctx, defaultCfg())
     expect(decision).not.toBeNull()
     expect(decision!.decision).toBe('block')

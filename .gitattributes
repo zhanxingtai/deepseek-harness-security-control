@@ -15,5 +15,40 @@
 *.ts text eol=lf
 *.snap text eol=lf
 
+# JSON and Markdown are pinned for the same reason. `locale/*.json` in
+# particular showed a phantom `M` on every branch switch — a clean
+# `git diff` alongside a dirty status, which is the signature of the
+# autocrlf/index mismatch rather than a real edit. Left unpinned, any
+# future README or locale edit risks the same false alarm, and a
+# `git add` that stages nothing is easy to misread as "already
+# committed". No build artefact is derived from either file's line
+# endings, so LF everywhere is safe.
+*.json text eol=lf
+*.md text eol=lf
+
+# 2026-10-23: these ship BYTE-FOR-BYTE into the marketplace tarball (they
+# are in package.json `files` and are copied, not compiled), so their line
+# endings are part of the published artefact's identity, not just working-
+# tree hygiene. Without a rule, `core.autocrlf=true` on a Windows checkout
+# rewrites them to CRLF, and the tarballs uploaded by `windows-package` /
+# `macos-package` stop being byte-identical to the ubuntu one that `release`
+# actually publishes — three platforms, three different artefacts.
+#
+# Concrete inventory of what this covers:
+#   policies/**/*.yaml  — default-policy.spl.yaml (~256 kB), parsed by the
+#                         engine and shipped verbatim
+#   cordis.patch.yml    — the marketplace PatchOptions contract
+#   *.mjs               — inspect-events / check-readme-sync /
+#                         stress-spl-interactive ship as scripts/
+#   LICENSE             — extensionless, hence the explicit name
+#
+# `*.js` is deliberately absent: `lib/` is the tsc outDir and is gitignored,
+# so no tracked .js exists and a rule for it would be dead config. The
+# shipped `lib/**/*.js` inherits LF from these LF-pinned `*.ts` sources.
+*.yaml text eol=lf
+*.yml text eol=lf
+*.mjs text eol=lf
+LICENSE text eol=lf
+
 # git hooks (extensionless) must stay LF: CRLF breaks bash hook execution on Windows
 scripts/git-hooks/* text eol=lf
