@@ -643,9 +643,11 @@ export function assembleComponents(
   // hook regardless of which one fired first.
   let runtimeHookInstalled = false
   const emitStartup = (payload: Record<string, unknown>): void => {
-    // plugin_startup is not registered with the platform
-    // (422 unsupported_event_type). Use localOnly so the event still lands
-    // in NDJSON for operator diagnostics without hitting the HTTP path.
+    // This build ships no uploader: the startup record lands in the local
+    // NDJSON file only, so there is no remote type registry to satisfy. If
+    // an uploader is ever wired in, the event type must be a name the
+    // receiving side accepts — project-scoped extension events are named
+    // `x_<project>_<type>`.
     try {
       eventCollector.report({
         comm: DEFAULT_PLATFORM_ID,
