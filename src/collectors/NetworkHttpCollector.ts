@@ -703,7 +703,7 @@ export class NetworkHttpCollector {
         const cb = cbIndex >= 0 ? (args[cbIndex] as (err: NodeJS.ErrnoException | null, address: string, family: number) => void) : undefined
         const rest = cbIndex >= 0 ? args.slice(0, cbIndex).concat(args.slice(cbIndex + 1)) : args
         const wrapped = (err: NodeJS.ErrnoException | null, address: string, family: number) => {
-          if (!err) this.emitDnsEvent(String(hostname), address)
+          if (!err && address) this.emitDnsEvent(String(hostname), address)
           if (cb) cb(err, address, family)
         }
         return (this.originalDnsLookup as unknown as (...args: unknown[]) => ReturnType<typeof dns.lookup>).call(
@@ -728,7 +728,18 @@ export class NetworkHttpCollector {
         const cb = cbIndex >= 0 ? (args[cbIndex] as (err: NodeJS.ErrnoException | null, records: unknown) => void) : undefined
         const rest = cbIndex >= 0 ? args.slice(0, cbIndex).concat(args.slice(cbIndex + 1)) : args
         const wrapped = (err: NodeJS.ErrnoException | null, records: unknown) => {
-          if (!err) this.emitDnsEvent(String(hostname), this.extractDnsAddress(records))
+          if (!err) {
+            const address = this.extractDnsAddress(records)
+            // The platform's `network_dns` contract requires `remote_ip`.
+            // A resolution that yields no address (a TXT/MX-only RRset, or
+            // a record shape we cannot read) has no schema-valid
+            // `network_dns` representation — emitting it anyway would make
+            // the platform reject the WHOLE batch and the SDK degrade the
+            // event to `x_bridge_network_dns`. The observation is dropped
+            // here instead, at the only place that knows the address is
+            // missing.
+            if (address) this.emitDnsEvent(String(hostname), address)
+          }
           if (cb) cb(err, records)
         }
         return (orig as unknown as (...args: unknown[]) => void).call(dns, hostname, ...rest, wrapped)
@@ -757,7 +768,7 @@ export class NetworkHttpCollector {
     return undefined
   }
 
-  private emitDnsEvent(query: string, remoteIp?: string): void {
+  private emitDnsEvent(query: string, remoteIp: string): void {
     const session = getHttpRequestSessionContext() ?? this.sessionResolve()
     const now = nowMs()
     const event: SecurityEvent = {
@@ -774,7 +785,9 @@ export class NetworkHttpCollector {
       remote_port: 53,
       service: 'dns',
       query,
-      ...(remoteIp ? { remote_ip: remoteIp } : {}),
+      // `remote_ip` is required by the platform's network_dns contract; the
+      // emitters above only call this once an address is known.
+      remote_ip: remoteIp,
       blocked: false,
       ...buildHostMeta(),
       session_id: session?.sessionId,

@@ -42,6 +42,9 @@ import type { SubprocessRuntimeLike } from '../src/types/external.js'
 class StubEventCollector {
   events: SecurityEvent[] = []
   report(event: SecurityEvent): void {
+    // the real sink stamps the wire fields in buildTransportEvent before
+    // validation runs — the stub has to do the same.
+    if (event.schema_version === undefined) event.schema_version = 1
     this.events.push(event)
   }
 }

@@ -84,6 +84,9 @@ function makeDeps(overrides: Partial<PluginUnloadSentinelDeps> = {}) {
   const deps: PluginUnloadSentinelDeps = {
     eventCollector: {
       report: (event) => {
+        // the real sink stamps the wire fields in buildTransportEvent
+        // before validation runs — the stub has to do the same.
+        if (event.schema_version === undefined) event.schema_version = 1
         reported.push(event)
       },
     },
@@ -390,6 +393,9 @@ describe('defense in depth with InlineSelfProtection (acceptance)', () => {
     const reported: SecurityEvent[] = []
     const sink = {
       report: (event: SecurityEvent) => {
+        // the real sink stamps the wire fields in buildTransportEvent
+        // before validation runs — the stub has to do the same.
+        if (event.schema_version === undefined) event.schema_version = 1
         reported.push(event)
       },
     }

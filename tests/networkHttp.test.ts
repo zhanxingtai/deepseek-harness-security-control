@@ -685,6 +685,61 @@ describe('NetworkHttpCollector', () => {
     expect(dnsEvent?.service).toBe('dns')
     expect(dnsEvent?.protocol).toBe('udp')
     expect(dnsEvent?.remote_port).toBe(53)
+    // the platform's network_dns contract requires the resolved address
+    expect(dnsEvent?.remote_ip).toBeTruthy()
+  })
+
+  it('does not emit network_dns when the resolution yields no address', async () => {
+    // A resolution with no address (a TXT/MX-only RRset, or a record
+    // shape we cannot read) has no schema-valid network_dns
+    // representation — the platform's contract requires `remote_ip`.
+    // Emitting it anyway would make the platform reject the whole batch
+    // and the SDK degrade the event to `x_bridge_network_dns`.
+    const originalResolve = dns.resolve
+    ;(dns as unknown as { resolve: unknown }).resolve = (
+      _hostname: string,
+      ...args: unknown[]
+    ): void => {
+      const cb = args.find((a) => typeof a === 'function') as
+        | ((err: NodeJS.ErrnoException | null, records: unknown) => void)
+        | undefined
+      cb?.(null, [])
+    }
+    const seen: SecurityEvent[] = []
+    const originalReport = (collector as unknown as { report: (e: SecurityEvent) => void }).report
+    ;(collector as unknown as { report: (e: SecurityEvent) => void }).report = function (event: SecurityEvent) {
+      seen.push(event)
+      originalReport.call(this, event)
+    }
+    try {
+      const config = makeConfig({
+        networkCapture: {
+          enabled: true,
+          redactBodies: true,
+          captureResponseBody: true,
+          maxBodyBytes: 1024 * 1024,
+          sseSummaryChunks: 5,
+          sseSummaryLastChunks: 1,
+          includeHosts: [],
+          excludeHosts: [],
+          excludeUrls: [],
+          sensitiveKeyPatterns: [],
+          captureDns: true,
+        },
+      })
+      httpCapture = new NetworkHttpCollector(config, { eventCollector: collector })
+      httpCapture.install()
+
+      dns.resolve('example.com', 'TXT', () => {})
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(seen.filter((e) => e.event_type === 'network_dns')).toHaveLength(0)
+    } finally {
+      // uninstall() restores the stubbed `dns.resolve`; then the real one
+      // goes back. `uninstall()` is idempotent, so afterEach is a no-op.
+      httpCapture.uninstall()
+      ;(dns as unknown as { resolve: unknown }).resolve = originalResolve
+    }
   })
 
   describe('invariant #6 leak fix (URL query redact)', () => {

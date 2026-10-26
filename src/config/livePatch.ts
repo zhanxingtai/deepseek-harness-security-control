@@ -515,6 +515,10 @@ export class LivePatchManager {
         comm: DEFAULT_PLATFORM_ID,
         event_id: generateEventId(),
         event_type: 'security_audit',
+        // this event is validated HERE (before the sink stamps it), so it has
+        // to carry the version itself — otherwise the local gate would drop
+        // the config-tamper audit record.
+        schema_version: 1,
         layer: 'application',
         source_layer: 'application',
         ts: now,

@@ -27,6 +27,7 @@ function makeEvent(overrides: Partial<SecurityEvent> = {}): SecurityEvent {
     comm: 'sst-security-control-dsh',
     event_id: overrides.event_id ?? generateEventId(),
     event_type: 'security_audit',
+    schema_version: 1,
     layer: 'application',
     source_layer: 'application',
     ts,
