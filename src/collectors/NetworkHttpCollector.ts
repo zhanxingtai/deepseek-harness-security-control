@@ -832,6 +832,16 @@ export class NetworkHttpCollector {
   private shouldSkip(host: string, path: string, requestUrl: string): boolean {
     const hostLower = host.toLowerCase()
 
+    // Self-capture gap (forward-looking): this build ships no uploader, so
+    // there is no reporting traffic to exclude yet. If an uploader is ever
+    // wired in — a governance SDK batch upload, or anything else that tags
+    // its requests with the `x-aise-protocol-version` header — that request
+    // would be captured here as ordinary business traffic, and every batch
+    // would re-enter the event stream and grow the next batch without bound.
+    // Before enabling any upload path, port the guard: skip requests
+    // carrying the protocol header (config `networkCapture.excludeInternalUploads`)
+    // and exclude the upload host(s) through an internal exclusion set that
+    // operator `excludeHosts` edits cannot wipe.
     if (this.includeHosts.size > 0 && !this.includeHosts.has(hostLower)) return true
     if (this.excludeHosts.has(hostLower)) return true
     for (const re of this.excludeUrlRegexps) {
@@ -1015,10 +1025,9 @@ export class NetworkHttpCollector {
       audit_category: 'integrity',
       audit_action: 'detect',
       severity: 'high',
-      // Platform security_audit schema requires `summary` — without it the
-      // row demotes to x_bridge_security_audit at the SDK bridge. The matched
-      // header VALUE stays out of the summary (sensitive); value_preview is
-      // already in audit_details.
+      // `summary` keeps the audit human-readable. The matched header VALUE
+      // stays out of it (sensitive); value_preview is already in
+      // audit_details.
       summary:
         `sensitive header '${matchedKey}' ${outcome === 'blocked' ? 'blocked on outbound request' : 'allowed under audit-only posture'}`,
       outcome,

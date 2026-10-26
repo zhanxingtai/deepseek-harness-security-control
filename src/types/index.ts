@@ -482,14 +482,11 @@ export interface SecurityEvent {
   /** Human-readable explanation for audit/integrity/security_audit events. */
   reason?: string
   /**
-   * fix : platform security_audit per-type schema
-   * requires these two top-level fields. `summary` is the canonical
-   * one-line description and is what audit consumers display.
-   * `severity`: the security_audit bridge mapping (governance-sdk
-   * EventAdapter) accepts ONLY low / medium / high / critical — an
-   * 'info' severity demotes the whole row to x_bridge_security_audit.
-   * The 5-tier union below covers non-audit local consumers; security_audit
-   * emitters must stay inside the 4 platform tiers.
+   * `audit_category` + `audit_action` are the two fields every
+   * security_audit emitter must set. `summary` is the canonical one-line
+   * description and is what audit consumers display.
+   * `severity` uses the 5 tiers below; the 4 tiers the governance platform
+   * accepts are a subset of them.
    */
   severity?: 'info' | 'low' | 'medium' | 'high' | 'critical'
   summary?: string
