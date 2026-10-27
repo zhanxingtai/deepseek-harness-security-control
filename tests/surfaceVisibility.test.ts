@@ -79,6 +79,8 @@ interface DebugLine {
 
 interface StartupEvent {
   event_type: string
+  session_id?: string
+  agent_id?: string
   metadata?: {
     surfaces?: Record<string, { available?: boolean | null; note?: string }>
   }
@@ -165,5 +167,18 @@ describe('BUG-5 surface degradation visibility', () => {
     expect(surfaces?.['network']?.available).toBe(true)
     // UI is a browser bundle; the plugin process cannot observe it.
     expect(surfaces?.['ui']?.available).toBeNull()
+  })
+
+  // T4 (2026-10-27): the producer no longer hardcodes
+  // `session_id: 'plugin-startup'` — the platform rule is "never invent a
+  // correlation id". The local NDJSON sink backfills its own '__plugin__'
+  // placeholder at write time (ensureSessionContext), so the observable
+  // change here is that the fabricated startup-scoped value is gone.
+  it('the plugin_startup event carries no fabricated session_id', async () => {
+    await bootHeadless()
+    const events = readEvents()
+    const startup = events.find((event) => event.event_type === 'plugin_startup')
+    expect(startup).toBeDefined()
+    expect(startup?.session_id).not.toBe('plugin-startup')
   })
 })

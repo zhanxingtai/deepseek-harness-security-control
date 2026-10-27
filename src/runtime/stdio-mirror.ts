@@ -46,7 +46,12 @@
  *   - Audit consumers re-merge on `(ts, child_pid, session_id, event_id)`.
  *     The wrapper's `session_id` is the host plugin's session_id (passed
  *     in via `--session-id` so post-hoc correlation works even when the
- *     host plugin's NDJSON is rotated or lost).
+ *     host plugin's NDJSON is rotated or lost). The run/agent/task/turn
+ *     correlation ids ride alongside as `--run-id` / `--agent-id` /
+ *     `--task-id` / `--turn-id` — the same keys RuntimeHook's
+ *     runtime_*_intent events carry — so mirror events join the spawn's
+ *     audit trail without re-parsing `run_id`. Flags left unspecified
+ *     leave the field undefined (JSON.stringify omits it, never '').
  */
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -103,6 +108,15 @@ interface ParsedArgs {
   outputPath: string
   statusPath: string
   sessionId: string | undefined
+  /** Run-level correlation ids — the same keys RuntimeHook's
+   *  runtime_*_intent events carry (`session_id` / `run_id` /
+   *  `agent_id` / `task_id` / `turn_id`). Absent flags stay undefined and
+   *  JSON.stringify then omits the field from the event (never an empty
+   *  string). */
+  runId: string | undefined
+  agentId: string | undefined
+  taskId: string | undefined
+  turnId: string | undefined
   childArgv: string[]
   cwd: string | undefined
   env: Record<string, string> | undefined
@@ -124,6 +138,10 @@ export function parseWrapperArgv(argv: readonly string[]): ParsedArgs {
   let outputPath: string | undefined
   let statusPath: string | undefined
   let sessionId: string | undefined
+  let runId: string | undefined
+  let agentId: string | undefined
+  let taskId: string | undefined
+  let turnId: string | undefined
   let cwd: string | undefined
   let parsedGraceMs: number | undefined
 
@@ -164,6 +182,18 @@ export function parseWrapperArgv(argv: readonly string[]): ParsedArgs {
         break
       case '--session-id':
         sessionId = takeNext()
+        break
+      case '--run-id':
+        runId = takeNext()
+        break
+      case '--agent-id':
+        agentId = takeNext()
+        break
+      case '--task-id':
+        taskId = takeNext()
+        break
+      case '--turn-id':
+        turnId = takeNext()
         break
       case '--cwd':
         cwd = takeNext()
@@ -228,6 +258,10 @@ export function parseWrapperArgv(argv: readonly string[]): ParsedArgs {
     outputPath,
     statusPath,
     sessionId,
+    runId,
+    agentId,
+    taskId,
+    turnId,
     childArgv,
     cwd,
     env,
@@ -375,6 +409,10 @@ function startPump(opts: {
   redactedArgv: readonly string[]
   argvRedactedKeys: readonly string[]
   sessionId: string | undefined
+  runId: string | undefined
+  agentId: string | undefined
+  taskId: string | undefined
+  turnId: string | undefined
   childExited: { value: boolean }
 }): PumpStats {
   const stats: PumpStats = { bytes: 0, chunks: 0 }
@@ -417,6 +455,10 @@ function startPump(opts: {
       wrapper_pid: wrapperPid,
       child_pid: opts.childPid,
       session_id: opts.sessionId,
+      run_id: opts.runId,
+      agent_id: opts.agentId,
+      task_id: opts.taskId,
+      turn_id: opts.turnId,
       cmdline,
       exe,
       stream: opts.streamName,
@@ -683,6 +725,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
       collection_method: 'stdio_mirror',
       wrapper_pid: wrapperPid,
       session_id: parsed.sessionId,
+      run_id: parsed.runId,
+      agent_id: parsed.agentId,
+      task_id: parsed.taskId,
+      turn_id: parsed.turnId,
       cmdline,
       exe,
       error_message: errorRedaction.value,
@@ -718,6 +764,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
     wrapper_pid: wrapperPid,
     child_pid: childPid,
     session_id: parsed.sessionId,
+    run_id: parsed.runId,
+    agent_id: parsed.agentId,
+    task_id: parsed.taskId,
+    turn_id: parsed.turnId,
     cmdline,
     exe,
     stream: 'meta',
@@ -756,6 +806,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
       redactedArgv,
       argvRedactedKeys,
       sessionId: parsed.sessionId,
+      runId: parsed.runId,
+      agentId: parsed.agentId,
+      taskId: parsed.taskId,
+      turnId: parsed.turnId,
       childExited,
     })
   } else if (stdinSpec.mode === 'pipe' || stdinSpec.mode === 'ignore') {
@@ -785,6 +839,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
       redactedArgv,
       argvRedactedKeys,
       sessionId: parsed.sessionId,
+      runId: parsed.runId,
+      agentId: parsed.agentId,
+      taskId: parsed.taskId,
+      turnId: parsed.turnId,
       childExited,
     })
   }
@@ -803,6 +861,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
       redactedArgv,
       argvRedactedKeys,
       sessionId: parsed.sessionId,
+      runId: parsed.runId,
+      agentId: parsed.agentId,
+      taskId: parsed.taskId,
+      turnId: parsed.turnId,
       childExited,
     })
   }
@@ -831,6 +893,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
           wrapper_pid: wrapperPid,
           child_pid: childPid,
           session_id: parsed.sessionId,
+          run_id: parsed.runId,
+          agent_id: parsed.agentId,
+          task_id: parsed.taskId,
+          turn_id: parsed.turnId,
           cmdline,
           exe,
           error_message: errorRedaction.value,
@@ -865,6 +931,10 @@ export async function runWrapper(parsed: ParsedArgs): Promise<number> {
     wrapper_pid: wrapperPid,
     child_pid: childPid,
     session_id: parsed.sessionId,
+    run_id: parsed.runId,
+    agent_id: parsed.agentId,
+    task_id: parsed.taskId,
+    turn_id: parsed.turnId,
     cmdline,
     exe,
     exit_code: exitCode,

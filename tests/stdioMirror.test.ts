@@ -69,6 +69,52 @@ describe('parseWrapperArgv', () => {
     expect(parsed.childArgv).toEqual(['bash', '-c', 'echo hi'])
   })
 
+  // T3 (2026-10-27): run/agent/task/turn correlation flags — the same keys
+  // RuntimeHook's runtime_*_intent events carry — join the wrapper's
+  // stdio_mirror events to the spawn's audit trail.
+  it('parses the run/agent/task/turn correlation flags', () => {
+    const argv = [
+      '--stdio-spec', JSON.stringify({
+        stdin: { mode: 'inherit', mirror: true, relay: true },
+        stdout: { mode: 'inherit', mirror: true, relay: true },
+        stderr: { mode: 'inherit', mirror: true, relay: true },
+      }),
+      '--limit-bytes', '4096',
+      '--output', '/tmp/x.jsonl',
+      '--status-path', '/tmp/x.status.json',
+      '--session-id', 's1',
+      '--run-id', 'r1',
+      '--agent-id', 'a1',
+      '--task-id', 't1',
+      '--turn-id', 'u1',
+      '--',
+      'bash', '-c', 'echo hi',
+    ]
+    const parsed = parseWrapperArgv(argv)
+    expect(parsed.sessionId).toBe('s1')
+    expect(parsed.runId).toBe('r1')
+    expect(parsed.agentId).toBe('a1')
+    expect(parsed.taskId).toBe('t1')
+    expect(parsed.turnId).toBe('u1')
+  })
+
+  it('supports the inline `--run-id=r1` form and leaves absent correlation flags undefined', () => {
+    const argv = [
+      '--stdio-spec={\"stdin\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true},\"stdout\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true},\"stderr\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true}}',
+      '--output=/tmp/x.jsonl',
+      '--status-path=/tmp/x.status.json',
+      '--run-id=r1',
+      '--task-id=t1',
+      '--', 'echo', 'hi',
+    ]
+    const parsed = parseWrapperArgv(argv)
+    expect(parsed.runId).toBe('r1')
+    expect(parsed.taskId).toBe('t1')
+    expect(parsed.sessionId).toBeUndefined()
+    expect(parsed.agentId).toBeUndefined()
+    expect(parsed.turnId).toBeUndefined()
+  })
+
   it('supports `--key=value` inline form for flags', () => {
     const argv = [
       '--stdio-spec={\"stdin\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true},\"stdout\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true},\"stderr\":{\"mode\":\"inherit\",\"mirror\":true,\"relay\":true}}',
@@ -267,6 +313,48 @@ describe('rewriteSpecForMirror', () => {
     expect(out.argv).toContain('--')
     const dashIdx = out.argv.indexOf('--')
     expect(out.argv.slice(dashIdx + 1)).toEqual(['bash', '-c', 'echo hi'])
+  })
+
+  // T3 (2026-10-27): the host passes the run/agent/task/turn correlation
+  // ids through to the wrapper argv. Present values become flags; absent
+  // ones are omitted (the wrapper then leaves the event field undefined
+  // rather than writing an empty string).
+  it('emits --run-id/--agent-id/--task-id/--turn-id from meta and omits them when absent', () => {
+    const mirrorSpec = {
+      stdin: { mode: 'inherit' as const, mirror: true, relay: true },
+      stdout: { mode: 'inherit' as const, mirror: true, relay: true },
+      stderr: { mode: 'inherit' as const, mirror: true, relay: true },
+    }
+    const withAll = rewriteSpecForMirror(
+      { argv: ['bash', '-c', 'echo hi'] },
+      '/abs/lib/runtime/stdio-mirror.js',
+      mirrorSpec,
+      cfg,
+      {
+        sessionId: 's1',
+        runId: 'r1',
+        agentId: 'a1',
+        taskId: 't1',
+        turnId: 'u1',
+        statusPath: '/tmp/m.jsonl.status',
+      },
+    )
+    expect(withAll.argv).toContain('--session-id=s1')
+    expect(withAll.argv).toContain('--run-id=r1')
+    expect(withAll.argv).toContain('--agent-id=a1')
+    expect(withAll.argv).toContain('--task-id=t1')
+    expect(withAll.argv).toContain('--turn-id=u1')
+
+    const without = rewriteSpecForMirror(
+      { argv: ['bash', '-c', 'echo hi'] },
+      '/abs/lib/runtime/stdio-mirror.js',
+      mirrorSpec,
+      cfg,
+      { statusPath: '/tmp/m.jsonl.status' },
+    )
+    for (const flag of ['--run-id', '--agent-id', '--task-id', '--turn-id', '--session-id']) {
+      expect(without.argv.some((a) => a.startsWith(`${flag}=`))).toBe(false)
+    }
   })
 
   // 2026-09-29 regression: when the caller passes no child env, the rewritten spec
@@ -512,7 +600,7 @@ describe('runWrapper — real fork', () => {
     }
   })
 
-  function spawnWrapper(childArgv: string[], overrides: Partial<Parameters<typeof parseWrapperArgv>[0] extends readonly string[] ? never : Record<string, unknown>> = {}): ReturnType<typeof spawn> {
+  function spawnWrapper(childArgv: string[], overrides: Partial<Parameters<typeof parseWrapperArgv>[0] extends readonly string[] ? never : Record<string, unknown>> = {}, wrapperExtraArgs: string[] = []): ReturnType<typeof spawn> {
     const outputPath = join(tmpDir, 'mirror.jsonl')
     const statusPath = join(tmpDir, 'status.json')
     const stdioSpec = JSON.stringify({
@@ -526,6 +614,9 @@ describe('runWrapper — real fork', () => {
       '--limit-bytes=1048576',
       `--output=${outputPath}`,
       `--status-path=${statusPath}`,
+      // T3 (2026-10-27): correlation flags ride before `--` like every
+      // other wrapper flag.
+      ...wrapperExtraArgs,
       '--',
       ...childArgv,
     ]
@@ -738,6 +829,83 @@ describe('runWrapper — real fork', () => {
     expect(exitLine.exit_signal).toBeNull()
     expect(exitLine.wrapper_pid).toBeGreaterThan(0)
     expect(typeof exitLine.duration_ms).toBe('number')
+  })
+
+  // T3 (2026-10-27): run/agent/task/turn correlation fields. The host
+  // (RuntimeHook.maybeRewriteForMirror) passes the same values as the
+  // runtime_*_intent events; the wrapper stamps them on every event type
+  // it emits.
+  const corrFlags = [
+    '--session-id=s1',
+    '--run-id=r1',
+    '--agent-id=a1',
+    '--task-id=t1',
+    '--turn-id=u1',
+  ]
+
+  it('stamps run_id/agent_id/task_id/turn_id on the meta marker, chunk, and exit events', async () => {
+    const child = spawnWrapper(
+      ['node', '-e', "process.stdout.write('corr-probe\\n'); setTimeout(()=>process.exit(0),300)"],
+      {},
+      corrFlags,
+    )
+    await runToEnd(child)
+    const lines = readFileSync(join(tmpDir, 'mirror.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l))
+    const meta = lines.find((l) => l.event_type === 'runtime_stdio_mirror' && l.stream === 'meta')
+    const chunk = lines.find((l) => l.event_type === 'runtime_stdio_mirror' && l.stream === 'stdout')
+    const exit = lines.find((l) => l.event_type === 'runtime_stdio_mirror_exit')
+    expect(meta).toBeDefined()
+    expect(chunk).toBeDefined()
+    expect(exit).toBeDefined()
+    for (const ev of [meta, chunk, exit]) {
+      expect(ev.session_id).toBe('s1')
+      expect(ev.run_id).toBe('r1')
+      expect(ev.agent_id).toBe('a1')
+      expect(ev.task_id).toBe('t1')
+      expect(ev.turn_id).toBe('u1')
+    }
+  })
+
+  it('stamps the correlation fields on the spawn-failed error event', async () => {
+    // A nonexistent binary makes the wrapper's spawn fail (ENOENT → the
+    // child 'error' path), exercising the runtime_stdio_mirror_error
+    // event's correlation fields.
+    const child = spawnWrapper(
+      ['dsh-corr-probe-definitely-not-a-real-binary'],
+      {},
+      corrFlags,
+    )
+    await runToEnd(child)
+    const err = await waitForMirrorLine(
+      join(tmpDir, 'mirror.jsonl'),
+      (l) => l.event_type === 'runtime_stdio_mirror_error',
+    )
+    expect(err.session_id).toBe('s1')
+    expect(err.run_id).toBe('r1')
+    expect(err.agent_id).toBe('a1')
+    expect(err.task_id).toBe('t1')
+    expect(err.turn_id).toBe('u1')
+  })
+
+  it('omits run_id/agent_id/task_id/turn_id (and session_id) when the flags are absent', async () => {
+    const child = spawnWrapper(
+      ['node', '-e', "process.stdout.write('no-corr\\n'); setTimeout(()=>process.exit(0),300)"],
+    )
+    await runToEnd(child)
+    const lines = readFileSync(join(tmpDir, 'mirror.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l))
+    const meta = lines.find((l) => l.event_type === 'runtime_stdio_mirror' && l.stream === 'meta')
+    const chunk = lines.find((l) => l.event_type === 'runtime_stdio_mirror' && l.stream === 'stdout')
+    const exit = lines.find((l) => l.event_type === 'runtime_stdio_mirror_exit')
+    expect(meta).toBeDefined()
+    expect(chunk).toBeDefined()
+    expect(exit).toBeDefined()
+    for (const ev of [meta, chunk, exit]) {
+      for (const key of ['session_id', 'run_id', 'agent_id', 'task_id', 'turn_id']) {
+        expect(ev, `${key} must be absent when its flag is not passed`).not.toHaveProperty(key)
+      }
+    }
   })
 
   it('records exit_signal when the child is signalled', async () => {

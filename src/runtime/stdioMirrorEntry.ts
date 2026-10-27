@@ -134,7 +134,8 @@ export function buildStdioMirrorSpec(
  * The wrapper is invoked as:
  *   `[node, <abs>/lib/runtime/stdio-mirror.js, --stdio-spec=<JSON>,
  *     --limit-bytes=<N>, --output=<path>, --status-path=<path>,
- *     --session-id=<sid>, --cwd=<cwd>, --grace-ms=<ms>,
+ *     --session-id=<sid>, --run-id=<rid>, --agent-id=<aid>,
+ *     --task-id=<tid>, --turn-id=<tid2>, --cwd=<cwd>, --grace-ms=<ms>,
  *     --, ...originalArgv]`
  *
  * The child env (`spec.env`) deliberately does
@@ -148,7 +149,10 @@ export function buildStdioMirrorSpec(
  * child, so the child's env contract is unchanged.
  *
  * `--session-id` correlates mirror events back to the agent
- * session / run_id / task_id. Cross-process event_id uniqueness
+ * session / run_id / task_id; `--run-id` / `--agent-id` / `--task-id` /
+ * `--turn-id` carry the remaining RuntimeHook correlation keys so
+ * wrapper events join runtime_*_intent events on the same dashboard
+ * fields. Cross-process event_id uniqueness
  * comes from `wrapperPid` (built into `event_id`); host seq is no
  * longer threaded into the wrapper.
  */
@@ -159,6 +163,10 @@ export function rewriteSpecForMirror(
   config: StdioMirrorConfig,
   meta: {
     sessionId?: string
+    runId?: string
+    agentId?: string
+    taskId?: string
+    turnId?: string
     statusPath: string
   },
 ): SubprocessSpawnSpec {
@@ -172,6 +180,21 @@ export function rewriteSpecForMirror(
   ]
   if (meta.sessionId) {
     args.push(`--session-id=${meta.sessionId}`)
+  }
+  // RuntimeHook correlation keys — same names/order as the intent events.
+  // Each flag is only emitted when the host actually has the value; the
+  // wrapper then writes the field (or omits it when the flag is absent).
+  if (meta.runId) {
+    args.push(`--run-id=${meta.runId}`)
+  }
+  if (meta.agentId) {
+    args.push(`--agent-id=${meta.agentId}`)
+  }
+  if (meta.taskId) {
+    args.push(`--task-id=${meta.taskId}`)
+  }
+  if (meta.turnId) {
+    args.push(`--turn-id=${meta.turnId}`)
   }
   if (spec.cwd) {
     args.push(`--cwd=${spec.cwd}`)

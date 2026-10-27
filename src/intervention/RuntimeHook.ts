@@ -1036,6 +1036,14 @@ export class RuntimeHook {
     const statusPath = `${mirror.config.outputPath}.${process.pid}.${seq}.status.json`
     return rewriteSpecForMirror(spec, mirror.wrapperPath, specBuild.spec, mirror.config, {
       sessionId: session?.sessionId,
+      // stamp the same correlation keys as emitIntentEvent
+      // so the wrapper's stdio_mirror events join runtime_*_intent events
+      // on the identical dashboard fields (task/turn fall back to
+      // session/run exactly like the intent events do).
+      runId: session?.runId,
+      agentId: session?.agentId,
+      taskId: session?.taskId ?? session?.sessionId,
+      turnId: session?.turnId ?? session?.runId,
       statusPath,
     })
   }

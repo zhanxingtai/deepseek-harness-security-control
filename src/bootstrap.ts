@@ -658,7 +658,9 @@ export function assembleComponents(
         timestamp: Date.now(),
         pid: process.pid,
         collection_method: 'agent_api',
-        session_id: 'plugin-startup',
+        // No fabricated session_id — the platform rule is "never invent a
+        // correlation id". The local NDJSON sink backfills its own
+        // '__plugin__' placeholder at write time when it needs one.
         agent_id: '__plugin__',
         metadata: payload,
         ...buildHostMeta(),
