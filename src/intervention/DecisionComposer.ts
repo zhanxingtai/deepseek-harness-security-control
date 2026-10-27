@@ -258,7 +258,13 @@ export function composeDecision(
   // ones for map-valued fields; list-valued fields are unioned so no
   // redaction is silently dropped.
   const mergedModify = decision === 'modify' ? mergeModifyActions(matched) : undefined
-  const riskAssessment = buildRiskAssessment(rule.evaluate, downgradedAction, aggregate, promotion)
+  const riskAssessment = buildRiskAssessment(
+    rule.evaluate,
+    downgradedAction,
+    aggregate,
+    promotion,
+    rule.severity,
+  )
   const reason = buildReason(rule, downgradedAction, aggregate, promotion)
 
   const intervention: Intervention = {
@@ -481,6 +487,7 @@ function buildRiskAssessment(
   action: ActionClause,
   agg: Aggregate,
   promotion: Promotion | undefined,
+  ruleSeverity?: CompiledRule['severity'],
 ): RiskAssessment | undefined {
   // Pre- gate, preserved: a lone `allow` rule that declares no risk level
   // produces no risk assessment. Extended by one case — if any OTHER matched
@@ -489,11 +496,57 @@ function buildRiskAssessment(
   if (!hasBaseSignal && agg.riskScore === 0) return undefined
   return {
     risk_score: agg.riskScore,
-    risk_level: evaluate?.risk_level ?? 'medium',
+    // The LEVEL of the matched rule.
+    //
+    // `evaluate.risk_level` is the legacy axis; SPL v2 migrated it to
+    // the rule's `severity` (see the migration note in RuleLoader) and
+    // the bundled policy no longer declares `evaluate.risk_level` at
+    // all. The old fallback hard-coded 'medium' for every rule that
+    // carried no explicit level — so a CRITICAL self-protection block
+    // was reported as `risk_level: 'medium'` on both
+    // `intervention.risk_assessment` and the platform's
+    // `policy_evaluation.matches[].risk_level`, and the fabricated
+    // value also SHADOWED the sink's own `inferRiskLevel` fallback
+    // (which maps a block to 'high'). The rule's own severity is the
+    // truthful answer; it is what `intervention.severity` already
+    // reports.
+    //
+    // `risk_score` stays 0 while the aggregate input is empty — the
+    // two fields answer different questions: the score is the
+    // MULTI-RULE aggregate (no rule declares `evaluate.risk_level`, so
+    // there is nothing to sum — see the operator-visible WARN above),
+    // the level is the matched rule's own severity. Deriving the
+    // score from severity instead is the "severity-driven aggregate
+    // fallback" the standards verdict is still pending on, so it is
+    // deliberately NOT implemented here.
+    risk_level: evaluate?.risk_level ?? severityToRiskLevel(ruleSeverity) ?? 'medium',
     dimensions: { ...agg.dimensions },
     matched_policies: [...agg.matchedPolicies],
     evaluation_path: [...agg.evaluationPath],
     ...(promotion ? { promotion: promotion.kind } : {}),
+  }
+}
+
+/**
+ * Map a rule's SPL v2 `severity` onto the legacy `risk_level` vocabulary
+ * used by `risk_assessment` and by the platform's
+ * `policy_evaluation.matches[].risk_level` (which enumerates
+ * critical / high / medium / low). `extreme` has no `risk_level`
+ * counterpart and folds into `critical`.
+ */
+function severityToRiskLevel(severity: CompiledRule['severity']): 'critical' | 'high' | 'medium' | 'low' | undefined {
+  switch (severity) {
+    case 'critical':
+    case 'extreme':
+      return 'critical'
+    case 'high':
+      return 'high'
+    case 'medium':
+      return 'medium'
+    case 'low':
+      return 'low'
+    default:
+      return undefined
   }
 }
 

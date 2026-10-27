@@ -94,6 +94,7 @@ const SAFE_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
     'maxFileBytes',
     'diskWarnWatermarkBytes',
     'diskLowWatermarkBytes',
+    'auditDedupWindowMs',
     // `redactRawParams` removed from safe-apply
     // — the marketplace forces it to true (see Config type literal +
     // normalizeConfig override). livePatch cannot toggle it off.
@@ -110,11 +111,14 @@ const SAFE_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
     'redactBodies',
     'captureResponseBody',
     'maxBodyBytes',
+    'maxRequestBodyBytes',
     'sseSummaryChunks',
     'sseSummaryLastChunks',
     'includeHosts',
     'excludeHosts',
     'excludeUrls',
+    'ignoreUrls',
+    'ignoreHosts',
     'sensitiveKeyPatterns',
     'captureDns',
   ]),
@@ -497,7 +501,8 @@ export class LivePatchManager {
   /**
    * config modify 审计事件（成功 modify / 拒绝 deny）。字段口径对齐
    * bootstrap 的 policy_tamper emit：security_audit 必填 audit_category +
-   * audit_action，severity/summary/target/outcome/reason 走平台枚举。
+   * audit_action，severity/reason/target/outcome 走平台口径（reason 为自由
+   * 文本说明，词汇语义由 audit_action 承载）。
    * 事件先过 validateEvent()，有 issue 只 warn 不重试（invariant #3）。
    */
   private emitAudit(
@@ -522,21 +527,19 @@ export class LivePatchManager {
         layer: 'application',
         source_layer: 'application',
         ts: now,
-        timestamp: now,
         pid: process.pid,
         collection_method: 'agent_api',
         host_id: hostname(),
         container_id: process.env.CONTAINER_ID || 'host',
-        session_id: '__plugin__',
-        run_id: '__plugin__',
-        agent_id: '__plugin__',
+        session_id: null,
+        run_id: null,
+        agent_id: null,
         audit_category: 'config',
         audit_action: action,
         severity,
-        summary: message,
+        reason: message,
         target: 'runtime-config',
         outcome: rejected ? 'blocked' : 'success',
-        reason: action,
         audit_details: { ...details, detail: message },
       }
       const issues = validateEvent(event)

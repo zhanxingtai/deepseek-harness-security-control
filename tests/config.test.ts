@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeConfig } from '../src/config.js'
+import { normalizeConfig, inheritLegacyRequestBodyBudget } from '../src/config.js'
 
 // marketplace Config surface. The previous shape carried
 // platform-deployment knobs (auth.type, system.procfs.*, assetMonitor.*,
@@ -37,10 +37,49 @@ describe('normalizeConfig ( marketplace surface)', () => {
     expect(config.intervention.mode).toBe('enforce')
   })
 
-  it('allows intervention.mode override to shadow the top-level mode', () => {
+  it('lets intervention.mode shadow the top-level mode on BOTH surfaces', () => {
+    // `intervention.mode` is the authoritative switch (the Config UI
+    // edits exactly that key). When the two disagree, the nested value
+    // wins — and it must win COMPLETELY: the top-level `mode` used to
+    // keep its own independently-derived value, so the enforcement seam
+    // (src/handlers.ts reads the top level) and the audit trail (the
+    // engine reads the nested one) could disagree about whether the
+    // plugin was blocking. The 2026-10-27 real capture was exactly
+    // that: the trail said "audit" while the tool layer hard-blocked.
     const config = normalizeConfig({ mode: 'audit', intervention: { mode: 'enforce' } })
-    expect(config.mode).toBe('audit')
+    expect(config.mode).toBe('enforce')
     expect(config.intervention.mode).toBe('enforce')
+  })
+
+  it('mirrors the effective mode onto both surfaces (they can never disagree)', () => {
+    // Every combination of the two knobs resolves to ONE value that
+    // both surfaces carry.
+    for (const raw of [
+      {},
+      { mode: 'audit' },
+      { mode: 'enforce' },
+      { intervention: { mode: 'audit' } },
+      { intervention: { mode: 'enforce' } },
+      { mode: 'audit', intervention: { mode: 'enforce' } },
+      { mode: 'enforce', intervention: { mode: 'audit' } },
+    ]) {
+      const config = normalizeConfig(raw)
+      expect(config.mode).toBe(config.intervention.mode)
+    }
+  })
+
+  it('is idempotent on the mode (a second normalize pass cannot flip it)', () => {
+    // The nested field is materialised from the effective value, so a
+    // second pass must resolve to the SAME value — otherwise the
+    // materialised copy reads as an "operator explicit" override and
+    // swallows the top-level (the bug documented in src/config/draft.ts).
+    const once = normalizeConfig({ mode: 'audit' })
+    const twice = normalizeConfig(once)
+    expect(twice.mode).toBe('audit')
+    expect(twice.intervention.mode).toBe('audit')
+    const thrice = normalizeConfig(twice)
+    expect(thrice.mode).toBe('audit')
+    expect(thrice.intervention.mode).toBe('audit')
   })
 
   it('merges nested collector config (marketplace fields)', () => {
@@ -70,6 +109,8 @@ describe('normalizeConfig ( marketplace surface)', () => {
     expect(config.networkCapture.redactBodies).toBe(true)
     expect(config.networkCapture.captureResponseBody).toBe(true)
     expect(config.networkCapture.maxBodyBytes).toBe(1024 * 1024)
+    // Request/response split: request bodies persist at 64 KiB by default.
+    expect(config.networkCapture.maxRequestBodyBytes).toBe(64 * 1024)
     expect(config.networkCapture.sseSummaryChunks).toBe(5)
     expect(config.networkCapture.sseSummaryLastChunks).toBe(1)
     expect(config.networkCapture.excludeHosts).toEqual([])
@@ -92,11 +133,53 @@ describe('normalizeConfig ( marketplace surface)', () => {
     })
     expect(config.networkCapture.enabled).toBe(false)
     expect(config.networkCapture.maxBodyBytes).toBe(4096)
+    // maxRequestBodyBytes absent → legacy inherit: request budget follows
+    // the operator's maxBodyBytes (pre-split both directions shared it).
+    expect(config.networkCapture.maxRequestBodyBytes).toBe(4096)
     expect(config.networkCapture.sseSummaryChunks).toBe(3)
     expect(config.networkCapture.sseSummaryLastChunks).toBe(2)
     expect(config.networkCapture.excludeHosts).toEqual(['localhost'])
     // Untouched fields keep their defaults.
     expect(config.networkCapture.redactBodies).toBe(true)
+  })
+
+  it('maxRequestBodyBytes: explicit value wins over the legacy maxBodyBytes inherit', () => {
+    const config = normalizeConfig({
+      networkCapture: { maxBodyBytes: 4096, maxRequestBodyBytes: 8192 },
+    })
+    expect(config.networkCapture.maxBodyBytes).toBe(4096)
+    expect(config.networkCapture.maxRequestBodyBytes).toBe(8192)
+  })
+
+  it('maxRequestBodyBytes: no networkCapture keys at all → 64 KiB default', () => {
+    const config = normalizeConfig({})
+    expect(config.networkCapture.maxRequestBodyBytes).toBe(64 * 1024)
+  })
+
+  it('inheritLegacyRequestBodyBudget is idempotent and tolerant of junk input', () => {
+    expect(inheritLegacyRequestBodyBudget(undefined)).toBe(undefined)
+    expect(inheritLegacyRequestBodyBudget(null)).toBe(null)
+    expect(inheritLegacyRequestBodyBudget('x')).toBe('x')
+    const already = { networkCapture: { maxBodyBytes: 1, maxRequestBodyBytes: 2 } }
+    expect(inheritLegacyRequestBodyBudget(already)).toBe(already)
+    const legacy = { networkCapture: { maxBodyBytes: 12345 } }
+    const inherited = inheritLegacyRequestBodyBudget(legacy) as { networkCapture: { maxRequestBodyBytes: number } }
+    expect(inherited.networkCapture.maxRequestBodyBytes).toBe(12345)
+    // Idempotent: a second pass does not overwrite the inherited value.
+    const again = inheritLegacyRequestBodyBudget(inherited) as { networkCapture: { maxRequestBodyBytes: number } }
+    expect(again.networkCapture.maxRequestBodyBytes).toBe(12345)
+  })
+
+  it('init.ts pre-seeds the legacy inherit BEFORE Schemastery validation', async () => {
+    // Schema carries the 64 KiB default; without the pre-seed a legacy
+    // {maxBodyBytes: 2 MiB} config would silently shrink to 64 KiB.
+    const { validateConfig } = await import('../src/config.schema.js')
+    const { inheritLegacyRequestBodyBudget } = await import('../src/config.js')
+    const legacy = { networkCapture: { maxBodyBytes: 2 * 1024 * 1024 } }
+    const validated = validateConfig(inheritLegacyRequestBodyBudget(legacy))
+    expect(validated?.networkCapture?.['maxRequestBodyBytes']).toBe(2 * 1024 * 1024)
+    const withoutPreseed = validateConfig(legacy)
+    expect(withoutPreseed?.networkCapture?.['maxRequestBodyBytes']).toBe(64 * 1024)
   })
 
   it('falls back to os.hostname() when hostId is missing', () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { LocalNdjsonSink } from '../src/collectors/LocalNdjsonSink.js'
 import { normalizeConfig, type Config } from '../src/config.js'
 import type { SecurityEvent } from '../src/types/index.js'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -18,7 +18,6 @@ function makeEvent(overrides: Partial<SecurityEvent> = {}): SecurityEvent {
     event_type: 'agent_message',
     layer: 'application',
     ts: 1700000000000,
-    timestamp: 1700000000000,
     pid: 1,
     host_id: 'host',
     container_id: 'host',
@@ -93,9 +92,9 @@ describe('LocalNdjsonSink audit-log integrity (2026-08-17 tamper regression, for
     expect(all[0].audit_action).toBe('detect')
     expect(all[0].audit_details?.integrity).toBe('file_deleted')
     expect(all[0].audit_details?.prev_bytes).toBeGreaterThan(0)
-    expect(all[0].agent_id).toBe('__plugin__')
-    expect(all[0].session_id).toBe('__plugin__')
-    expect(all[0].run_id).toBe('__plugin__')
+    expect(all[0].agent_id).toBe(null)
+    expect(all[0].session_id).toBe(null)
+    expect(all[0].run_id).toBe(null)
     expect(all[1].event_id).toBe('a-2')
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('被删除'))
     ec.shutdown()
@@ -236,7 +235,7 @@ describe('LocalNdjsonSink audit-log integrity (2026-08-17 tamper regression, for
     ec.shutdown()
   })
 
-  it('falls back to __plugin__ for events from the plugin process without a session', async () => {
+  it('falls back to explicit null identity for events from the plugin process without a session', async () => {
     const ec = new LocalNdjsonSink(makeConfig(path), { logger })
     ec.initialize()
     ec.report({
@@ -248,13 +247,13 @@ describe('LocalNdjsonSink audit-log integrity (2026-08-17 tamper regression, for
     })
     await ec.flush()
     const all = lines(path)
-    expect(all[0].agent_id).toBe('__plugin__')
-    expect(all[0].session_id).toBe('__plugin__')
-    expect(all[0].run_id).toBe('__plugin__')
+    expect(all[0].agent_id).toBe(null)
+    expect(all[0].session_id).toBe(null)
+    expect(all[0].run_id).toBe(null)
     ec.shutdown()
   })
 
-  it('falls back to __unattributed__ for external events without a session', async () => {
+  it('falls back to explicit null identity for external events without a session', async () => {
     const ec = new LocalNdjsonSink(makeConfig(path), { logger })
     ec.initialize()
     ec.report({
@@ -266,9 +265,52 @@ describe('LocalNdjsonSink audit-log integrity (2026-08-17 tamper regression, for
     })
     await ec.flush()
     const all = lines(path)
-    expect(all[0].agent_id).toBe('__unattributed__')
-    expect(all[0].session_id).toBe('__unattributed__')
-    expect(all[0].run_id).toBe('__unattributed__')
+    expect(all[0].agent_id).toBe(null)
+    expect(all[0].session_id).toBe(null)
+    expect(all[0].run_id).toBe(null)
+    ec.shutdown()
+  })
+
+  it('external rotation (archive sibling) re-baselines WITHOUT an integrity alert', async () => {
+    // Real-data regression: operator/harness housekeeping renamed the log
+    // to an archive sibling; the next write flagged a hostile file_deleted.
+    // A fresh `<name>.<suffix>` sibling within the last minute marks the
+    // deletion as a compliant rotation.
+    const ec = new LocalNdjsonSink(makeConfig(path), { logger })
+    ec.initialize()
+    ec.report(makeEvent({ event_id: 'rot-1' }))
+    await ec.flush()
+    expect(existsSync(path)).toBe(true)
+
+    // External rotation: rename to an archive sibling (fresh mtime).
+    renameSync(path, `${path}.1`)
+    ec.report(makeEvent({ event_id: 'rot-2' }))
+    await ec.flush()
+
+    const audits = lines(path).filter(
+      (e) => e.event_type === 'security_audit' && e.audit_details?.['integrity'],
+    )
+    expect(audits).toHaveLength(0)
+    // The post-rotation write landed in a fresh file.
+    expect(lines(path).some((e) => e.event_id === 'rot-2')).toBe(true)
+    ec.shutdown()
+  })
+
+  it('hostile deletion (no archive sibling) still raises the integrity alert', async () => {
+    const ec = new LocalNdjsonSink(makeConfig(path), { logger })
+    ec.initialize()
+    ec.report(makeEvent({ event_id: 'del-1' }))
+    await ec.flush()
+
+    rmSync(path)
+    ec.report(makeEvent({ event_id: 'del-2' }))
+    await ec.flush()
+
+    const audits = lines(path).filter(
+      (e) => e.event_type === 'security_audit' && e.audit_details?.['integrity'],
+    )
+    expect(audits).toHaveLength(1)
+    expect(audits[0].audit_details?.['integrity']).toBe('file_deleted')
     ec.shutdown()
   })
 

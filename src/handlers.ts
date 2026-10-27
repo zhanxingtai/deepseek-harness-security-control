@@ -51,6 +51,27 @@ export function registerHandlers(ctx: Context, deps: HandlerDeps): void {
 
   safeHandler(ctx, 'agent/created', (payload) => {
     applicationCollector.runWithHttpContext(payload, () => applicationCollector.onAgentSessionStart(payload))
+    // Cold-read backstop: the `session/title` live subscription can miss
+    // titles assigned before this listener registered (plugin restart,
+    // resumed session). The host's sessionQuery service resolves a title
+    // from the session event log for live AND persisted sessions. Fully
+    // best-effort — an absent service or a rejected read changes nothing.
+    try {
+      const sessionQuery = ctx.reflect.get('sessionQuery') as
+        | { readTitle?: (sessionId: string) => Promise<string | null> }
+        | undefined
+      const sessionId = payload.agent?.session?.header?.id
+      if (sessionQuery?.readTitle && typeof sessionId === 'string') {
+        sessionQuery
+          .readTitle(sessionId)
+          .then((title) => applicationCollector.onSessionTitleEvent({ header: { id: sessionId } }, { type: 'session/title', data: { title } }))
+          .catch(() => {
+            /* best-effort */
+          })
+      }
+    } catch {
+      /* best-effort */
+    }
   }, failSafeSink)
 
   safeHandler(ctx, 'agent/pre-step', async (payload, _next) => {
@@ -73,7 +94,15 @@ export function registerHandlers(ctx: Context, deps: HandlerDeps): void {
         decision = undefined
       }
 
-      if (decision?.decision === 'block' && config.mode === 'enforce') {
+      // The authoritative enforcement switch is `intervention.mode`
+      // (the Config UI edits that key; the README documents it as the
+      // single knob). `config.mode` is the legacy top-level alias and
+      // now carries the SAME value — `normalizeConfig` mirrors the
+      // effective mode onto both surfaces so the enforcement seam and
+      // the audit trail can never disagree. Reading the authoritative
+      // key here keeps the seam correct even for a hand-built Config
+      // that skipped normalization.
+      if (decision?.decision === 'block' && (config.intervention?.mode ?? config.mode) === 'enforce') {
         applicationCollector.onToolPreExecute(exec, decision)
         const reason = decision.block_reason ?? decision.intervention?.block_reason ?? 'blocked by security policy'
         ctx.logger.warn(`[SecurityMonitor] blocked tool ${exec.name}: ${reason}`)
@@ -131,7 +160,6 @@ export function registerHandlers(ctx: Context, deps: HandlerDeps): void {
   safeHandler(ctx, 'fs/observed', (target, observation, actor) => {
     applicationCollector.onFsObserved(target, observation, actor)
   }, failSafeSink)
-
   // fs/write-intent must re-throw on error to surface the failure to the
   // fs-observation-policy waterfall owner; safeHandler swallows. Kept manual.
   ctx.on('fs/write-intent', async (target, actor, next) => {
@@ -142,6 +170,18 @@ export function registerHandlers(ctx: Context, deps: HandlerDeps): void {
       throw error
     }
   })
+
+  // --- session/title subscription -------------------------------------------
+  //
+  // The host's SessionTitleService appends `session/title` events to the
+  // session log every time a session's display title is assigned or
+  // renamed (fallback → LLM → user rename). We subscribe for the title
+  // payload only; the listener never blocks and never touches the host.
+  // Titles observed before `agent/created` for a session are queued in
+  // SessionStore and applied when the session context is created.
+  safeHandler(ctx, 'session/event', (session, event) => {
+    applicationCollector.onSessionTitleEvent(session, event)
+  }, failSafeSink)
 
   // --- llm/stream tee -----------------------------------------------------
   //

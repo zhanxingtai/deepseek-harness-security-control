@@ -38,7 +38,6 @@ const PLATFORM_REQUIRED: Record<string, string[]> = {
   // the DSH extension types are validated by common-v1 + the event_type
   // const only — the payload is the collector's own
   code_mode_exec: [],
-  plugin_startup: [],
   runtime_spawn_intent: [],
   runtime_spawn_denied: [],
   runtime_resolve_intent: [],
@@ -467,7 +466,7 @@ describe('Event schema validation', () => {
   // Runtime Hook events (standardized names) —
   // The platform registers these as `x_dsh_runtime_*` and validates them
   // with common-v1 + the event_type const only. The collector's own
-  // payload (cmdline / exe / argv / cwd) is free-form, so the local gate
+  // payload (cmdline / exe / cwd) is free-form, so the local gate
   // must NOT require it — a stricter local gate would drop events the
   // platform would have accepted.
   describe('runtime_* events', () => {
@@ -484,7 +483,6 @@ describe('Event schema validation', () => {
         pid: 4321,
         cmdline: 'bash -c echo hi',
         exe: 'bash',
-        argv: ['bash', '-c', 'echo hi'],
         ...overrides,
       }
     }
@@ -515,17 +513,16 @@ describe('Event schema validation', () => {
     })
 
     it('accepts runtime_spawn_intent without cmdline / exe (collector-owned payload)', () => {
-      const evt = baseRuntime({ cmdline: undefined, exe: undefined, argv: undefined }) as any
+      const evt = baseRuntime({ cmdline: undefined, exe: undefined }) as any
       const issues = validateEvent({ ...evt, event_type: 'runtime_spawn_intent' })
       expect(issues).toEqual([])
     })
 
-    it('runtime_hook_error does NOT require argv (can fire before argv is known)', () => {
-      const evt = baseRuntime({ argv: undefined, exe: undefined }) as any
+    it('runtime_hook_error does NOT require exe (can fire before the command is known)', () => {
+      const evt = baseRuntime({ exe: undefined }) as any
       const issues = validateEvent({ ...evt, event_type: 'runtime_hook_error' })
-      // argv/exe missing is fine for hook_error; the platform contract
+      // exe missing is fine for hook_error; the platform contract
       // does not constrain the collector's payload at all.
-      expect(issues.some((i) => i.path === 'argv')).toBe(false)
       expect(issues.some((i) => i.path === 'exe')).toBe(false)
     })
 

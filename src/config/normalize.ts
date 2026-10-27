@@ -103,6 +103,35 @@ export function withDefaults<T extends object>(defaults: T, input: unknown): T {
 }
 
 /**
+ * Request/response body-budget split (2026-10-27): `maxBodyBytes` used to
+ * bound BOTH directions. Configs that predate `maxRequestBodyBytes` only
+ * carry `maxBodyBytes` — their effective request budget must NOT silently
+ * shrink from that value to the new 64 KiB default. When the input sets
+ * `maxBodyBytes` but not `maxRequestBodyBytes`, inherit the former as the
+ * latter. No-op when either key is already present or the input is not an
+ * object.
+ *
+ * Idempotent + pure. Callers:
+ *   - `normalizeConfig` (direct raw-config path, e.g. tests / fallback)
+ *   - `init.ts` BEFORE Schemastery validation, because the Schema default
+ *     would otherwise fill `maxRequestBodyBytes: 64 KiB` and mask the
+ *     legacy intent.
+ */
+export function inheritLegacyRequestBodyBudget<T>(input: T): T {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input
+  const obj = input as Record<string, unknown>
+  const nc = obj['networkCapture']
+  if (!nc || typeof nc !== 'object' || Array.isArray(nc)) return input
+  const ncRecord = nc as Record<string, unknown>
+  if (typeof ncRecord['maxRequestBodyBytes'] === 'number') return input
+  if (typeof ncRecord['maxBodyBytes'] !== 'number') return input
+  return {
+    ...obj,
+    networkCapture: { ...ncRecord, maxRequestBodyBytes: ncRecord['maxBodyBytes'] },
+  } as T
+}
+
+/**
  * Default-mode-from-policy seam.
  *
  * Returns `true` iff the raw operator input explicitly sets the runtime
@@ -139,16 +168,38 @@ export function isModeExplicit(rawInput: unknown): boolean {
 export function normalizeConfig(input: unknown): Config {
   const obj = (input ?? {}) as Record<string, unknown>
 
-  // top-level `mode` is the operator-facing single knob.
-  // Propagate it down into `intervention.mode` when the operator did not
-  // override the nested field, so existing patch YAMLs that set only
-  // top-level `mode: enforce` continue to drive the intervention engine.
+  // THE effective mode — one value, two surfaces, never a disagreement.
   //
-  // Default is 'enforce' to match the Schema default (see
-  // `src/config.schema.ts:381`) and the bundled
-  // `policies/default-policy.spl.yaml` `mode: enforce` declaration.
-  // A fresh install with no operator input lands in enforce
-  // without relying on the engine's policy-file upgrade seam.
+  // `intervention.mode` is the authoritative switch (the Config UI edits
+  // exactly that key, and the README documents it as the single knob);
+  // the top-level `mode` is a legacy alias kept for old patch YAMLs.
+  // Resolution: the nested value wins when the operator set it, else the
+  // top-level one, else the 'enforce' default (matching the Schema
+  // default at `src/config.schema.ts:341` and the bundled
+  // `policies/default-policy.spl.yaml` `mode: enforce` declaration).
+  //
+  // WHY the top-level is MIRRORED to the effective value (it used to
+  // keep its own independently-derived value):
+  //
+  //   The enforcement seam (src/handlers.ts) read the TOP-LEVEL
+  //   `config.mode`, while the engine and therefore every audit row
+  //   read `config.intervention.mode`. The two could disagree, and did:
+  //   in the 2026-10-27 real capture the operator's Config-UI switch
+  //   (`intervention.mode: audit`) was honoured by the audit trail
+  //   (`policy_evaluation.mode: "audit"`) while the top-level default
+  //   (`mode: enforce`) still hard-blocked the very call the trail
+  //   described as "audit" — the tool layer denied an `npm uninstall`
+  //   and the row said the runtime was auditing. A control the
+  //   operator flips in the UI has to have exactly ONE meaning
+  //   everywhere: enforcement, the audit trail, and the sink's
+  //   mode snapshot.
+  //
+  //   Mirroring also makes normalizeConfig IDEMPOTENT on the mode: the
+  //   nested field is materialised from the effective value, so a
+  //   second normalize pass resolves to the same value instead of
+  //   treating the materialised copy as an "operator explicit"
+  //   override (the swallow-the-top-level bug documented in
+  //   src/config/draft.ts).
   const topMode: Mode = obj.mode === 'audit' ? 'audit' : 'enforce'
 
   const interventionInput = (obj.intervention && typeof obj.intervention === 'object')
@@ -158,6 +209,8 @@ export function normalizeConfig(input: unknown): Config {
   const interventionMode = (interventionInput['mode'] === 'enforce' || interventionInput['mode'] === 'audit')
     ? interventionInput['mode']
     : topMode
+  // The effective mode — what BOTH surfaces now carry.
+  const effectiveMode: Mode = interventionMode
   const intervention: InterventionConfig = {
     ...DEFAULTS_INTERVENTION,
     ...interventionInput,
@@ -427,7 +480,10 @@ export function normalizeConfig(input: unknown): Config {
 
   return {
     ...obj,
-    mode: topMode,
+    // MIRRORED to the effective mode — see the `effectiveMode` comment
+    // above. The top-level `mode` is no longer derived independently:
+    // it is the same value the engine reads and the audit trail records.
+    mode: effectiveMode,
     enabled: obj.enabled !== false,
     hostId: typeof obj.hostId === 'string' && obj.hostId ? obj.hostId : hostname(),
     containerId:
@@ -440,7 +496,13 @@ export function normalizeConfig(input: unknown): Config {
       redactRawParams: true,
     },
     application: withDefaults(DEFAULTS_APPLICATION, obj.application),
-    networkCapture: withDefaults(DEFAULTS_NETWORK_CAPTURE, obj.networkCapture),
+    // inheritLegacyRequestBodyBudget takes the TOP-LEVEL config (it looks
+    // up `networkCapture` itself) — a legacy maxBodyBytes-only config
+    // inherits that value as the request budget.
+    networkCapture: withDefaults(
+      DEFAULTS_NETWORK_CAPTURE,
+      inheritLegacyRequestBodyBudget(obj)['networkCapture'],
+    ),
     intervention,
     runtimeHooks: withDefaults(DEFAULTS_RUNTIME_HOOKS, obj.runtimeHooks),
     inlineGuards,

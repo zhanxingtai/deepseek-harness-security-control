@@ -27,6 +27,7 @@ function makeConfig(tmpDir: string, mode: 'audit' | 'enforce' = 'audit'): Config
         redactBodies: true,
         captureResponseBody: true,
         maxBodyBytes: 1024 * 1024,
+        maxRequestBodyBytes: 1024 * 1024,
         sseSummaryChunks: 5,
         sseSummaryLastChunks: 1,
         includeHosts: [],

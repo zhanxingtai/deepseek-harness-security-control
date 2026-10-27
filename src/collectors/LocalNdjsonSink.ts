@@ -13,9 +13,9 @@
  * `sink_disk_recovered`, `shutdown` (plus `local_direct_escape` /
  * `local_batch_escape` for the ENOSPC escape channel).
  */
-import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import fs from 'node:fs'
-import { dirname } from 'node:path'
+import { basename as pathBasename, dirname, join as joinPath } from 'node:path'
 import { hostname } from 'node:os'
 import type { Config } from '../config.js'
 import type { Mode, SecurityEvent, PolicyEvaluationMatch } from '../types/index.js'
@@ -30,11 +30,52 @@ const PARENT_POLICY_ID = DEFAULT_PLATFORM_ID
 const PARENT_POLICY_VERSION = 1
 
 /**
+ * How long the sink waits before the SECOND stat that confirms a
+ * missing audit log. The window has to cover a rotator's
+ * rename→create gap (milliseconds) without stalling the write path
+ * for long: the delay is only paid on the rare "file is gone" branch.
+ */
+const INTEGRITY_CONFIRM_DELAY_MS = 50
+
+/**
+ * Park the current thread for `ms` milliseconds without spinning the
+ * event loop. `Atomics.wait` on a SharedArrayBuffer is the only
+ * synchronous sleep available in Node — the sink's write path is
+ * synchronous (`lstatSync` / `appendFileSync`), so an async pause
+ * would have to race the next write.
+ */
+function sleepSyncMs(ms: number): void {
+  if (!Number.isFinite(ms) || ms <= 0) return
+  const shared = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(shared, 0, 0, ms)
+}
+
+/**
+ * Human-readable stat kind for the integrity-alert channel. `unknown`
+ * when the stat is missing (the path vanished again) or when the kind
+ * is not one of the special file types.
+ */
+function describeStatKind(stat: import('node:fs').Stats | undefined): string {
+  if (!stat) return 'unknown'
+  if (stat.isCharacterDevice()) return 'character_device'
+  if (stat.isBlockDevice()) return 'block_device'
+  if (stat.isSymbolicLink()) return 'symlink'
+  if (stat.isFIFO()) return 'fifo'
+  if (stat.isSocket()) return 'socket'
+  if (stat.isDirectory()) return 'directory'
+  return 'unknown'
+}
+
+/**
  * Event types for which a policy_evaluation.status of `no_match` makes sense
  * (the event type participates in SPL evaluation). All other types without an
- * intervention are reported as `not_applicable`.
+ * intervention are `not_applicable`.
+ *
+ * Not referenced by the local persistence path (the compressed empty-hit
+ * form omits `status`); exported for the future upload-time expansion,
+ * which must re-derive `status` from this set before batch upload.
  */
-const POLICY_APPLICABLE_EVENT_TYPES = new Set([
+export const POLICY_APPLICABLE_EVENT_TYPES = new Set([
   'agent_start',
   'agent_stop',
   'agent_session_start',
@@ -103,7 +144,8 @@ export interface LocalNdjsonSinkOptions {
    * collector_integrity / security_audit events emitted by
    * `reportIntegrityGap`). When injected, the resolver maps the
    * plugin's own `process.pid` to the currently active session. If no
-   * session is active, the event falls back to `__plugin__` placeholders.
+   * session is active, the identity fields are written null per the
+   * platform identity rule.
    */
   resolveSessionByPid?: (pid: number) => { sessionId: string; runId: string; agentId?: string } | undefined
   /**
@@ -114,6 +156,14 @@ export interface LocalNdjsonSinkOptions {
    * behaviour based on this knob.
    */
   freeDiskBytes?: (dirPath: string) => number | null
+  /**
+   * Test-only seam for the SECOND-STRIKE confirmation window: how long
+   * the sink waits before re-statting an audit log it just found
+   * missing. Defaults to 50 ms (enough to cover a rotator's
+   * rename→create gap). The implementation never changes behaviour based
+   * on this knob beyond the wait itself.
+   */
+  integrityConfirmDelayMs?: number
   /**
    * observer fired whenever the local NDJSON
    * is rotated or truncated by the sink itself (`size cap`,
@@ -266,11 +316,47 @@ export class LocalNdjsonSink {
    *  intervention-less events so the emitted row claims the mode the engine
    *  actually ran instead of a hardcoded default. */
   private mode: Mode
+  /**
+   * Operator declaration: the audit log file's lifecycle is owned by an
+   * EXTERNAL tool (a log rotator, a shipper, a volume manager). When
+   * true, a file-lifecycle anomaly (the log disappeared / shrank / was
+   * swapped) is an expected lifecycle event: the sink re-baselines and
+   * logs a WARN instead of raising an `integrity/detect` gap.
+   *
+   * Default false — the anomaly is reported. An operator turns this on
+   * when the rotation strategy cannot be recognised by the archive-
+   * sibling heuristic (e.g. `copytruncate`, or a rotator that moves the
+   * file to another directory).
+   */
+  private externallyManagedLog: boolean
+  /**
+   * Delay before the second stat that confirms a missing audit log.
+   * See `LocalNdjsonSinkOptions.integrityConfirmDelayMs`.
+   */
+  private integrityConfirmDelayMs: number
 
   constructor(config: Config, options: LocalNdjsonSinkOptions = {}) {
     this.config = config.collector
     this.sinkDiskLow = config.sinkDiskLow
-    this.mode = config.mode
+    // The RUNTIME mode — the mode the engine actually ran under. Taken
+    // from the authoritative `intervention.mode` (the Config UI edits
+    // that key); `config.mode` is the legacy top-level alias and
+    // `normalizeConfig` mirrors the effective value onto both, so the
+    // two agree by construction. This snapshot backs the
+    // `policy_evaluation.mode` field, which describes the posture the
+    // evaluation ran under — NOT the posture of an individual
+    // decision (a mode-independent safety-net denial carries
+    // `intervention.mode: 'enforce'` inside an audit-mode runtime).
+    this.mode = config.intervention?.mode ?? config.mode
+    // The operator's declaration about the log file's lifecycle — see
+    // the `externallyManagedLog` field comment.
+    this.externallyManagedLog = config.collector.externallyManagedLog === true
+    // The second-stat confirmation window. `INTEGRITY_CONFIRM_DELAY_MS`
+    // unless the caller overrides it (test seam).
+    this.integrityConfirmDelayMs =
+      typeof options.integrityConfirmDelayMs === 'number'
+        ? options.integrityConfirmDelayMs
+        : INTEGRITY_CONFIRM_DELAY_MS
     // Normalized-config identity stamps. `normalizeConfig`
     // guarantees both are non-empty strings (hostId falls back to
     // `hostname()`, containerId to `'host'`), so the sink can backfill
@@ -300,11 +386,14 @@ export class LocalNdjsonSink {
   }
 
   /**
-   * guarantee that `agent_id` / `session_id` / `run_id` are
-   * present on every event. Prefer the active PID->session cache; fall back
-   * to process-bound placeholders when no session is active. Explicit empty
-   * strings are preserved so callers that intentionally stub a field (e.g.
-   * fs handlers with no active session) are not overwritten.
+   * guarantee that `agent_id` / `session_id` / `run_id`
+   * are present on every event. Prefer the active PID->session cache; fall back
+   * to explicit JSON null when no session is active — per the platform
+   * identity rule (common.json) an undeterminable identity is written null,
+   * never a fabricated sentinel, so SOC correlation does not link unrelated
+   * events. Explicit values (including null) are preserved so callers that
+   * intentionally stub a field (e.g. fs handlers with no active session)
+   * are not overwritten.
    *
    * The same guarantee covers `host_id` / `container_id`:
    * several producers (RuntimeHook subprocess events, bootstrap startup
@@ -325,17 +414,12 @@ export class LocalNdjsonSink {
         return
       }
     }
-    if (event.agent_id === undefined) {
-      // The plugin's own process emits startup / asset / integrity events.
-      // Events from other PIDs without a resolver are host-wide noise.
-      event.agent_id = event.pid === process.pid || event.pid === undefined ? '__plugin__' : '__unattributed__'
-    }
-    if (event.session_id === undefined) {
-      event.session_id = event.agent_id === '__plugin__' || event.agent_id === '__unattributed__' ? event.agent_id : '__unattributed__'
-    }
-    if (event.run_id === undefined) {
-      event.run_id = event.agent_id === '__plugin__' || event.agent_id === '__unattributed__' ? event.agent_id : '__unattributed__'
-    }
+    // Identity unknown — write JSON null per the platform rule. The
+    // pre-null form used '__plugin__' / '__unattributed__' sentinels,
+    // which SOC tooling could mistake for real correlation keys.
+    if (event.agent_id === undefined) event.agent_id = null
+    if (event.session_id === undefined) event.session_id = null
+    if (event.run_id === undefined) event.run_id = null
   }
 
   initialize(): void {
@@ -409,17 +493,34 @@ export class LocalNdjsonSink {
    *
    * The platform per-type validator requires every
    * `matches[]` element AND `final_match` to carry `priority`, `risk_level`,
-   * `decision`, `policy_version` (string). `final_match` may no longer be
-   * `null` — both `no_match` and `not_applicable` branches now return a
-   * synthetic placeholder match so the wire shape stays uniform across all
-   * statuses.
+   * `decision`, `policy_version` (string).
+   *
+   * Local-volume form: when nothing matched, the block compresses to the
+   * minimal `{ schema_version, mode, policy_decision }` — `status` /
+   * `matches` / `final_match` are omitted because they are derivable
+   * (status from POLICY_APPLICABLE_EVENT_TYPES, matches/final_match are
+   * constants for the empty case) and dominated the NDJSON byte budget
+   * (~110 bytes × every event). An uploader must expand the minimal form
+   * back to the full platform shape (status + `matches: []` +
+   * `final_match: null`) before batch upload.
    */
   private buildPolicyEvaluation(event: SecurityEvent): NonNullable<SecurityEvent['policy_evaluation']> {
     // Fall back to the sink's RUNTIME mode, not a hardcoded
     // 'audit' — intervention-less events (network_http / agent_message /
     // agent_tool_result / fs rows) should claim the mode the engine
     // actually ran so operator triage sees the right mode.
-    const base = { schema_version: 1, mode: (event.intervention?.mode ?? this.mode) as Mode }
+    //
+    // The runtime mode is used for EVERY event, including the ones
+    // that carry an intervention: `policy_evaluation` describes the
+    // posture the evaluation ran under, while the posture of an
+    // individual verdict lives on `intervention.mode`. The two differ
+    // exactly for the mode-independent safety nets (the hardcoded
+    // self-protection guard denies regardless of the runtime mode and
+    // stamps `intervention.mode: 'enforce'` +
+    // `intervention.mode_independent: true`) — reading the
+    // intervention's mode here would have reported the whole runtime
+    // as 'enforce' because of one guard hit.
+    const base = { schema_version: 1, mode: this.mode }
     const intervention = event.intervention
     if (intervention?.decision) {
       const ruleId = intervention.policy_id ?? intervention.policy_name ?? 'unknown-rule'
@@ -447,19 +548,11 @@ export class LocalNdjsonSink {
         final_match: match,
       }
     }
-    const applicable = POLICY_APPLICABLE_EVENT_TYPES.has(event.event_type)
-    // The platform's `policy-evaluation-v1.schema.json`
-    // declares `final_match` in `required: [...]` for ALL policy_evaluation objects.
-    //   - status=matched         → final_match must be a non-null match object
-    //   - status=no_match/       → final_match must be the JSON null literal
-    //     not_applicable            (field is present, value is null)
+    // Compressed empty-hit form — see the doc comment above.
     return {
       ...base,
-      status: applicable ? 'no_match' : 'not_applicable',
       policy_decision: 'allow',
-      matches: [],
-      final_match: null,
-    } as NonNullable<SecurityEvent['policy_evaluation']>
+    }
   }
 
   /**
@@ -470,7 +563,10 @@ export class LocalNdjsonSink {
   private extractMatchPriority(event: SecurityEvent): number {
     const fromIntervention = (event.intervention as Record<string, unknown> | undefined)?.priority
     if (typeof fromIntervention === 'number') return fromIntervention
-    const fromRisk = (event.risk_assessment as Record<string, unknown> | undefined)?.max_priority
+    // risk_signal lives on intervention.risk_assessment (single-copy
+    // invariant — the top-level event.risk_assessment duplicate was
+    // removed in the 2026-10-27 dedup batch).
+    const fromRisk = (event.intervention?.risk_assessment as Record<string, unknown> | undefined)?.max_priority
     if (typeof fromRisk === 'number') return fromRisk
     return 0
   }
@@ -482,11 +578,12 @@ export class LocalNdjsonSink {
    * default per SPL §4.2.1.
    */
   private extractMatchRiskLevel(event: SecurityEvent): 'critical' | 'high' | 'medium' | 'low' | null {
-    const fromRisk = (event.risk_assessment as Record<string, unknown> | undefined)?.risk_level
+    // Single copy on intervention.risk_assessment (see extractMatchPriority).
+    const fromRisk = (event.intervention?.risk_assessment as Record<string, unknown> | undefined)?.risk_level
     if (fromRisk === 'critical' || fromRisk === 'high' || fromRisk === 'medium' || fromRisk === 'low') {
       return fromRisk
     }
-    const dims = (event.risk_assessment as Record<string, unknown> | undefined)?.dimensions as
+    const dims = (event.intervention?.risk_assessment as Record<string, unknown> | undefined)?.dimensions as
       | Record<string, number>
       | undefined
     if (dims && Object.keys(dims).length > 0) {
@@ -938,21 +1035,19 @@ export class LocalNdjsonSink {
         layer: 'application',
         source_layer: 'application',
         ts: now,
-        timestamp: now,
         pid: process.pid,
         collection_method: 'agent_api',
         host_id: hostname(),
         container_id: process.env.CONTAINER_ID || 'host',
-        session_id: session?.sessionId ?? '__plugin__',
-        run_id: session?.runId ?? '__plugin__',
-        agent_id: session?.agentId ?? '__plugin__',
+        session_id: session?.sessionId ?? null,
+        run_id: session?.runId ?? null,
+        agent_id: session?.agentId ?? null,
         audit_category: 'sink',
         audit_action: isLow ? 'escalate' : 'warn',
         target: this.localPath!,
         outcome: isLow ? 'failure' : 'success',
         severity: isLow ? 'high' : 'medium',
-        summary: message,
-        reason: isLow ? 'escalate' : 'warn',
+        reason: message,
         audit_details: {
           event_type_alias: kind,
           free_bytes: free,
@@ -1239,7 +1334,70 @@ export class LocalNdjsonSink {
       // `stat_kind: 'symlink'` through the same integrity-alert channel.
       stat = lstatSync(this.localPath!)
     } catch {
-      // File is gone entirely — an attacker deleted the audit trail.
+      // File is gone entirely. Distinguish a compliant external rotation
+      // (an operator / harness housekeeping job renamed the log to an
+      // archive sibling — the real-data `file_deleted` alert was this
+      // case, prev_bytes well under the size cap) from a hostile
+      // deletion of the audit trail.
+      if (this.isCompliantRotation()) {
+        // Rotation: re-baseline silently. The next append recreates the
+        // file and starts a fresh trail — no integrity alert.
+        this.logger.warn(
+          `[LocalNdjsonSink] audit log rotated externally (archive sibling present) — re-baselining without integrity alert (prev_bytes=${this.lastLocalBytes})`,
+        )
+        this.debugLog?.write('external_rotation', { prevBytes: this.lastLocalBytes ?? null })
+        this.rotatedCount += 1
+        this.lastRotationAt = Date.now()
+        this.lastLocalBytes = undefined
+        this.lastLocalInode = undefined
+        return
+      }
+      // The operator declared the log's lifecycle as externally managed
+      // (`collector.externallyManagedLog`) — the file's disappearance is
+      // then an expected lifecycle event, not evidence of tampering.
+      if (this.externallyManagedLog) {
+        this.handleExternalLifecycle('deleted')
+        return
+      }
+      // SECOND-STRIKE CONFIRMATION.
+      //
+      // A single failed stat cannot tell "the trail was deleted" from
+      // "the trail is being rotated right now": an external rotator
+      // that renames the log away and creates a fresh one leaves the
+      // path missing for the few milliseconds between the two steps,
+      // and a stat landing in that window reports a hostile deletion
+      // that never happened. Re-stat once after a short delay; if the
+      // path is back, the trail was rotated, not deleted.
+      const confirmation = this.confirmPathReappeared()
+      if (confirmation.reappeared) {
+        if (confirmation.stat?.isFile()) {
+          // Rotation window: the file is a regular file again. Re-baseline
+          // silently — a trail that was renamed away and recreated is a
+          // fresh trail, not a gap.
+          this.logger.warn(
+            `[LocalNdjsonSink] audit log path was momentarily absent (rotation window) — re-baselining without integrity alert (prev_bytes=${this.lastLocalBytes})`,
+          )
+          this.debugLog?.write('external_rotation', {
+            prevBytes: this.lastLocalBytes ?? null,
+            confirmed: true,
+          })
+          this.rotatedCount += 1
+          this.lastRotationAt = Date.now()
+          this.lastLocalBytes = undefined
+          this.lastLocalInode = undefined
+          return
+        }
+        // The path came back as something that is NOT a regular file
+        // (symlink / device / FIFO) — that is the replacement attack,
+        // not a rotation. Fall through to the replacement branch below.
+        this.reportIntegrityGap('file_replaced', this.lastLocalBytes, {
+          prev_inode: this.lastLocalInode,
+          current_inode: confirmation.stat?.ino,
+          stat_kind: describeStatKind(confirmation.stat),
+        })
+        return
+      }
+      // An attacker deleted the audit trail.
       this.reportIntegrityGap('file_deleted', this.lastLocalBytes)
       return
     }
@@ -1253,20 +1411,26 @@ export class LocalNdjsonSink {
     // FIFO, socket, symlink). Report as `file_replaced` (the most
     // specific existing event) and surface the stat kind for triage.
     if (!stat.isFile()) {
-      let statKind = 'unknown'
-      if (stat.isCharacterDevice()) statKind = 'character_device'
-      else if (stat.isBlockDevice()) statKind = 'block_device'
-      else if (stat.isSymbolicLink()) statKind = 'symlink'
-      else if (stat.isFIFO()) statKind = 'fifo'
-      else if (stat.isSocket()) statKind = 'socket'
+      if (this.externallyManagedLog) {
+        this.handleExternalLifecycle('replaced')
+        return
+      }
       this.reportIntegrityGap('file_replaced', this.lastLocalBytes, {
         prev_inode: this.lastLocalInode,
         current_inode: stat.ino,
-        stat_kind: statKind,
+        stat_kind: describeStatKind(stat),
       })
       return
     }
     if (stat.size < this.lastLocalBytes) {
+      // A shrinking file is the copytruncate shape (an external rotator
+      // empties the file in place) as well as the hostile-truncation
+      // shape. An operator who declared the log externally managed has
+      // told us which one it is.
+      if (this.externallyManagedLog) {
+        this.handleExternalLifecycle('truncated')
+        return
+      }
       this.reportIntegrityGap('file_truncated', this.lastLocalBytes)
       return
     }
@@ -1276,6 +1440,10 @@ export class LocalNdjsonSink {
     // a truncation that also changes inode is still reported as truncated
     // (the more specific event).
     if (this.lastLocalInode !== undefined && stat.ino !== this.lastLocalInode) {
+      if (this.externallyManagedLog) {
+        this.handleExternalLifecycle('replaced')
+        return
+      }
       this.reportIntegrityGap('file_replaced', this.lastLocalBytes, {
         prev_inode: this.lastLocalInode,
         current_inode: stat.ino,
@@ -1287,6 +1455,96 @@ export class LocalNdjsonSink {
       size: stat.size,
       inode: stat.ino,
     })
+  }
+
+  /**
+   * SECOND-STRIKE confirmation for a missing audit log.
+   *
+   * Re-stats the path after a short synchronous delay. Returns
+   * `{ reappeared: false }` when the path is still gone (a real
+   * deletion), and `{ reappeared: true, stat }` when the path is back
+   * (the rotator's rename→create window closed while we waited).
+   *
+   * WHY the delay is synchronous: the sink's write path is synchronous
+   * (`lstatSync` / `appendFileSync`), so an async confirmation would
+   * have to race the next write — and the whole point of the
+   * confirmation is to decide BEFORE the next write whether the trail
+   * is gone. `Atomics.wait` parks the thread without spinning the
+   * event loop.
+   *
+   * Protected (not private) so the test suite can drive the branch
+   * deterministically instead of racing a real filesystem race.
+   */
+  protected confirmPathReappeared(): { reappeared: boolean; stat?: import('node:fs').Stats } {
+    sleepSyncMs(this.integrityConfirmDelayMs)
+    try {
+      const stat = lstatSync(this.localPath!)
+      return { reappeared: true, stat }
+    } catch {
+      return { reappeared: false }
+    }
+  }
+
+  /**
+   * Operator-declared external lifecycle: the audit log's file
+   * lifecycle (rotation / deletion / truncation) is owned by another
+   * tool, so a lifecycle anomaly is an expected event, not evidence of
+   * tampering. Re-baseline silently and keep the counters honest.
+   *
+   * This is the operator's explicit statement — the default posture
+   * (this flag off) keeps reporting every anomaly as an integrity gap.
+   */
+  private handleExternalLifecycle(kind: 'deleted' | 'truncated' | 'replaced'): void {
+    this.logger.warn(
+      `[LocalNdjsonSink] audit log ${kind} — externally managed log declared (collector.externallyManagedLog=true); re-baselining without integrity alert (prev_bytes=${this.lastLocalBytes})`,
+    )
+    this.debugLog?.write('external_lifecycle', {
+      kind,
+      prevBytes: this.lastLocalBytes ?? null,
+      prevInode: this.lastLocalInode ?? null,
+    })
+    this.rotatedCount += 1
+    this.lastRotationAt = Date.now()
+    this.lastLocalBytes = undefined
+    this.lastLocalInode = undefined
+  }
+
+  /**
+   * Detect a compliant EXTERNAL rotation: the active log path is gone,
+   * but a sibling archive matching `<name>.<suffix>` / `<name>-<suffix>`
+   * exists with a recent mtime (renamed within the last minute). The
+   * sink's OWN rotations never reach this check — size-cap rotation is a
+   * rename-over-target (the path never goes missing) and the disk-low
+   * truncate resets the baseline first. This branch exists for operator
+   * / harness housekeeping that renames the log away (the observed
+   * real-data `file_deleted` alert, prev_bytes far under the cap).
+   * Anything not matching the archive-sibling pattern is treated as a
+   * hostile deletion.
+   */
+  private isCompliantRotation(): boolean {
+    if (!this.localPath) return false
+    const dir = dirname(this.localPath)
+    const base = pathBasename(this.localPath)
+    let siblings: string[]
+    try {
+      siblings = readdirSync(dir)
+    } catch {
+      return false
+    }
+    const cutoff = Date.now() - 60_000
+    for (const name of siblings) {
+      if (name === base) continue
+      // `<base>.<something>` or `<base>-<something>` (e.g.
+      // security-events.jsonl.1, security-events.jsonl.20261027.bak).
+      if (!name.startsWith(`${base}.`) && !name.startsWith(`${base}-`)) continue
+      try {
+        const st = statSync(joinPath(dir, name))
+        if (st.isFile() && st.mtimeMs >= cutoff) return true
+      } catch {
+        /* vanished mid-scan — not evidence */
+      }
+    }
+    return false
   }
 
   private reportIntegrityGap(
@@ -1307,9 +1565,9 @@ export class LocalNdjsonSink {
       // infinite recursion through writeLocalDirect → checkLocalIntegrity → reportIntegrityGap.
       // Keep session context via resolveSessionByPid so tests can verify attribution.
       const session = this.resolveSessionByPid?.(process.pid)
-      const sessionId = session?.sessionId ?? '__plugin__'
-      const runId = session?.runId ?? '__plugin__'
-      const agentId = session?.agentId ?? '__plugin__'
+      const sessionId = session?.sessionId ?? null
+      const runId = session?.runId ?? null
+      const agentId = session?.agentId ?? null
       const event: SecurityEvent = {
         comm: DEFAULT_PLATFORM_ID,
         event_id: generateEventId(),
@@ -1317,7 +1575,6 @@ export class LocalNdjsonSink {
         layer: 'application',
         source_layer: 'application',
         ts: Date.now(),
-        timestamp: Date.now(),
         pid: process.pid,
         collection_method: 'agent_api',
         host_id: hostname(),
@@ -1330,8 +1587,7 @@ export class LocalNdjsonSink {
         target: this.localPath!,
         outcome: 'failure',
         severity: 'high',
-        summary: message,
-        reason: 'detect',
+        reason: message,
         audit_details: {
           integrity: kind,
           prev_bytes: prevBytes,

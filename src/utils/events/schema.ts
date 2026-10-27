@@ -53,8 +53,8 @@ const EVENT_TYPE_RULES: Record<string, EventTypeRule[]> = {
   // JSON-string the platform ingest contract keys off); ApplicationCollector
   // emits it as the canonical tool-args carrier.
   agent_tool_call: ['tool_call_id', 'tool_name', 'tool_params'],
-  // `status` ∈ {success, failure, blocked, error}; `execution_status` is an
-  // internal alias retained as informational only.
+  // `status` ∈ {success, failure, blocked, error} per the platform
+  // agent contract — `status` is the only execution-state field.
   agent_tool_result: ['tool_call_id', 'status'],
   // file_* class: the platform requires `path` only. `session_id` /
   // `tool_call_id` stay optional because the fs/observed → file_read |
@@ -86,7 +86,7 @@ const EVENT_TYPE_RULES: Record<string, EventTypeRule[]> = {
   // application-layer HTTP request events. Emitted by
   // NetworkHttpCollector inside the harness Node process. `method`/`url`/
   // `host`/`direction`/`service` are the minimal audit handle; the
-  // response fields (code/response_body/latency_ms) and `headers` are
+  // response fields (code/body/latency_ms) and `headers` are
   // optional in the platform contract.
   network_http: ['service', 'direction', 'method', 'host', 'url'],
   // the platform's process contract is `anyOf [cmdline, exe]`
@@ -103,10 +103,13 @@ const EVENT_TYPE_RULES: Record<string, EventTypeRule[]> = {
   //
   // The runtime layer keeps the marketplace-neutral names (no vendor
   // prefix); the platform resolves them through its ingest alias table.
-  // The structured `argv` vector stays optional metadata for
-  // fragment-variable attack replay.
+  // The platform process contract is `anyOf [cmdline, exe]` — the
+  // structured argv vector no longer rides on emitted events.
   code_mode_exec: [],
-  plugin_startup: [],
+  // plugin_startup is GONE: the startup report now rides the standard
+  // agent_start lifecycle type (distinguished by
+  // `collector.hook_name === 'plugin_startup'`), so it needs no entry of
+  // its own — agent_start's `pid` requirement above covers it.
   runtime_spawn_intent: [],
   runtime_spawn_denied: [],
   runtime_resolve_intent: [],

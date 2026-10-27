@@ -60,6 +60,7 @@ pnpm dsh plugin --profile web remove sst-security-control-dsh
 | `intervention.mode` | `enforce` | 策略执行模式：`audit`（仅记录）或 `enforce`（阻断）。 |
 | `enabled` | `true` | 总开关 |
 | `collector.localOutputPath` | `~/.dsh/security-events.jsonl` | 事件日志路径 |
+| `collector.externallyManagedLog` | `false` | 声明审计日志的轮转/删除由外部工具接管：文件生命周期异常只告警，不再产生 integrity 缺口事件 |
 | `runtimeHooks.enabledAtSubprocess` | `true` | 启用子进程 spawn 拦截 |
 | `runtimeHooks.blockAtSubprocess` | `false` | 在 `enforce` 模式下阻断被拒的子进程 |
 | `intervention.failStrategy` | `fail_open` | 干预引擎故障/超时时的策略（`fail_open` 放行 / `fail_closed` 阻断） |

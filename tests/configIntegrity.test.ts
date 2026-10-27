@@ -105,6 +105,7 @@ describe('runConfigIntegrityCheck ( / fix / cleanup)', () => {
         redactBodies: true,
         captureResponseBody: true,
         maxBodyBytes: 1048576,
+        maxRequestBodyBytes: 1024 * 1024,
       },
       runtimeHooks: {
         enabled: true,

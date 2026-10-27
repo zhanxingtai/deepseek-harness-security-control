@@ -633,11 +633,77 @@ describe('SensitivePathWatcher', () => {
     const last = events[events.length - 1]!
     expect(last.audit_category).toBe('integrity')
     expect(last.audit_action).toBe('detect')
-    expect(last.severity).toBe('high')
+    // The watcher is observability-only (see the class header): it
+    // observes a filesystem change and attributes it to nobody. It must
+    // therefore NOT present itself as a high-severity threat — the
+    // 2026-10 capture had 28 such rows, all of them the operator's own
+    // SSH client touching ~/.ssh, and they were indistinguishable from
+    // a real attack.
+    expect(last.severity).toBe('low')
     expect(last.outcome).toBe('success')
-    expect(last.reason).toBe('deny')
+    expect(last.reason).toBe('sensitive path observed (watcher); no block performed')
     expect(last.audit_details?.watcher).toBe('sensitive-path-guard')
-    expect(last.risk_flags).toContain('sensitive_path_access')
+    // `sensitive_path_access` is the SPL match dimension for a GUARDED
+    // access attempt (set by the inline guard). An unattributed
+    // observation must not carry it, or a policy rule could match it
+    // and turn it into an action.
+    expect(last.risk_flags ?? []).not.toContain('sensitive_path_access')
+    const details = last.audit_details as Record<string, unknown>
+    expect(details['observation_only']).toBe(true)
+    expect(details['blocked']).toBe(false)
+    expect(details['sensitive_path_observed']).toBe(true)
+  })
+
+  it('file target + glob parent produce ONE row for the same write (no x/x duplicate)', async () => {
+    // Real-data regression: a file entry (`~/.ssh/config`) was registered
+    // as a file-watch AND the glob (`~/.ssh/*`) watched its parent dir —
+    // one write produced two rows: `~/.ssh/config` (dir watch) and
+    // `~/.ssh/config/config` (file watch reporting its own basename).
+    const targetDir = join(tmpRoot, 'ssh2')
+    mkdirSync(targetDir, { recursive: true })
+    const targetFile = join(targetDir, 'id_ed25519')
+    writeFileSync(targetFile, 'placeholder', { mode: 0o600 })
+
+    watcher = new SensitivePathWatcher({
+      eventCollector: collector as unknown as Parameters<typeof SensitivePathWatcher>[0]['eventCollector'],
+      cfg: {
+        enabled: true,
+        // Absolute paths — the file entry must expand to itself for the
+        // file-target detection (pattern expands to the watched path).
+        paths: [`${targetDir}/*`, targetFile],
+        watchEnabled: true,
+        watchDebounceMs: 30,
+      },
+      sessionResolve: () => ({ sessionId: 'sess-1', runId: 'run-1', agentId: 'agent-1' }),
+      logger: { warn: () => {} },
+    })
+    watcher.start()
+
+    writeFileSync(targetFile, 'updated')
+    const deadline = Date.now() + 5000
+    let events: SecurityEvent[] = []
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25))
+      events = collector.events.filter(
+        (e) => e.event_type === 'security_audit' && e.target === targetFile,
+      )
+      // Wait until the dust settles (no new row for a quiet spell) so the
+      // count assertion is stable.
+      if (events.length >= 1) {
+        const before = collector.events.length
+        await new Promise((r) => setTimeout(r, 150))
+        if (collector.events.length === before) break
+      }
+    }
+    expect(events.length).toBe(1)
+    // The doubled-suffix row must be gone entirely.
+    expect(
+      collector.events.some((e) => e.target === `${targetFile}/${targetFile.split('/').pop()}`),
+    ).toBe(false)
+    // Correlation id for the protection domain.
+    expect((events[0]!.audit_details as Record<string, unknown>)['rule_id']).toBe(
+      'sensitive-path-guard',
+    )
   })
 
   it('skips directories that do not exist on this host', () => {

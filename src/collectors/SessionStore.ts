@@ -97,6 +97,11 @@ export class SessionStore {
   /** last user prompt per session, used by the token-usage detector's
    *  session attribution (most-recent message fallback). */
   private readonly recentUserMessages = new Map<string, { prompt: string; timestamp: number }>()
+  /** Session titles observed via the host `session/title` event BEFORE the
+   *  session context exists in the store. Applied once on
+   *  `getOrCreateSession`; entries carry the observation timestamp so the
+   *  TTL sweep can prune titles for sessions that never materialize. */
+  private readonly pendingSessionTitles = new Map<string, { title: string; ts: number }>()
   /** Most-recent `tools/pre-execute` session. The RuntimeHook wrapper at the
    * subprocess seam doesn't see the `exec` object, so it correlates spawns
    * to sessions via "the pre-execute that just fired". Safe under the
@@ -129,6 +134,11 @@ export class SessionStore {
       }
       this.sessions.set(sessionId, session)
       this.stats.sessionsTracked++
+    }
+    const pendingTitle = this.pendingSessionTitles.get(sessionId)
+    if (pendingTitle !== undefined && !session.sessionTitle) {
+      session.sessionTitle = pendingTitle.title
+      this.pendingSessionTitles.delete(sessionId)
     }
     if (!session.blockedCalls) session.blockedCalls = new Map()
     if (!session.pendingToolStarts) session.pendingToolStarts = new Map()
@@ -175,6 +185,12 @@ export class SessionStore {
         this.options.tokenUsageDetector.clearSession(sessionId)
       }
     }
+    // Prune queued titles whose session never materialized (or was evicted
+    // above) — same TTL window as sessions so a title observed just before
+    // its session's `agent/created` survives the sweep.
+    for (const [sessionId, pending] of this.pendingSessionTitles.entries()) {
+      if (pending.ts < cutoff) this.pendingSessionTitles.delete(sessionId)
+    }
     // Prune pid bindings whose owning session was just evicted OR whose
     // own ts is past the cutoff. Without the evictedSessionIds branch a
     // session that bound many PIDs at start would leave orphan entries
@@ -187,6 +203,23 @@ export class SessionStore {
       this.options.pidBindingStore.evictBySessionId(sessionId)
     }
     this.options.pidBindingStore.evictStale(cutoff)
+  }
+
+  /** Record a session title observed from the host `session/title` event
+   *  (fallback / LLM / user rename — caller passes each emission through;
+   *  the store keeps last-wins semantics because the harness only appends
+   *  the event when the title actually changed). Applies to the live
+   *  session context when one exists; otherwise queues in
+   *  `pendingSessionTitles` for the session's first `getOrCreateSession`.
+   *  No-ops on empty / non-string titles. */
+  recordSessionTitle(sessionId: string, title: unknown): void {
+    if (typeof title !== 'string' || title.length === 0) return
+    const session = this.sessions.get(sessionId)
+    if (session) {
+      session.sessionTitle = title
+      return
+    }
+    this.pendingSessionTitles.set(sessionId, { title, ts: nowMs() })
   }
 
   /** Record the most-recent `tools/pre-execute` session so RuntimeHook can
@@ -329,6 +362,7 @@ export class SessionStore {
   clearAll(): void {
     this.sessions.clear()
     this.recentUserMessages.clear()
+    this.pendingSessionTitles.clear()
     this.mostRecentSession = undefined
   }
 }

@@ -76,7 +76,6 @@ describe('EventEmitter', () => {
       expect(event.layer).toBe('application')
       expect(event.source_layer).toBe('application')
       expect(event.ts).toBeGreaterThan(0)
-      expect(event.timestamp).toBe(event.ts)
       expect(event.pid).toBe(process.pid)
       expect(event.collection_method).toBe('agent_api')
       expect(event.session_id).toBe('session-1')
@@ -92,6 +91,15 @@ describe('EventEmitter', () => {
       // The shape is stable across hosts.
       expect('host_id' in event).toBe(true)
       expect('container_id' in event).toBe(true)
+    })
+
+    it('stamps session_title only when the session context carries one', () => {
+      // Host titles are assigned AFTER session start (fallback on the first
+      // user message, then LLM / user rename) — events built before that
+      // carry no session_title field at all, never an empty string.
+      expect('session_title' in emitter.makeBaseEvent('agent_message', makeSession())).toBe(false)
+      const titled = emitter.makeBaseEvent('agent_message', makeSession({ sessionTitle: 'fix auth bug' }))
+      expect(titled.session_title).toBe('fix auth bug')
     })
 
     it('does NOT increment eventsEmitted (pure builder)', () => {
@@ -161,6 +169,37 @@ describe('EventEmitter', () => {
       expect(event.intervention?.block_code).toBe('INLINE_SENSITIVE_PATH_001')
     })
 
+    it('keeps risk_assessment single-copy on intervention only (no top-level duplicate)', () => {
+      const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
+      const decision: SecurityDecision = {
+        decision: 'block',
+        mode: 'enforce',
+        block_reason: 'credential access attempt',
+        block_code: 'INLINE_SENSITIVE_PATH_001',
+        appealable: false,
+        intervention: {
+          decision: 'deny',
+          decision_internal: 'block',
+          mode: 'enforce',
+          block_reason: 'credential access attempt',
+          block_code: 'INLINE_SENSITIVE_PATH_001',
+          risk_assessment: {
+            risk_level: 'high',
+            max_priority: 80,
+            dimensions: { sensitive_path: 80 },
+          } as never,
+        },
+        latency_ms: 1,
+      }
+      emitter.applyDecisionToEvent(event, decision)
+      expect(
+        (event.intervention as Record<string, unknown> | undefined)?.risk_assessment,
+      ).toMatchObject({ risk_level: 'high' })
+      // The 2026-10-27 dedup batch removed the top-level duplicate (it
+      // triple-copied the block on every blocked event).
+      expect((event as Record<string, unknown>).risk_assessment).toBeUndefined()
+    })
+
     it('drops top-level block_reason on allow decisions', () => {
       const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
       const decision: SecurityDecision = {
@@ -172,6 +211,87 @@ describe('EventEmitter', () => {
       emitter.applyDecisionToEvent(event, decision)
       expect(event.blocked).toBe(false)
       expect(event.block_reason).toBeUndefined()
+    })
+
+    it('hoists the decision severity onto the event top level for a block', () => {
+      // Real-data regression: 633 of the 959 rows in the 2026-10-27
+      // capture carried NO top-level severity, and BOTH genuine
+      // detections (the blocked `npm uninstall`) were among them — so a
+      // dashboard filtering on `severity` saw the 58 hard-coded-'high'
+      // noise rows and missed the real blocks. The severity filter was
+      // inverted against the operator's interest.
+      const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
+      const decision: SecurityDecision = {
+        decision: 'block',
+        mode: 'enforce',
+        severity: 'critical',
+        block_reason: 'uninstall attempt',
+        block_code: 'SELF_PROTECTION_UNINSTALL_001',
+        appealable: false,
+        intervention: {
+          decision: 'deny',
+          decision_internal: 'block',
+          mode: 'enforce',
+          severity: 'critical',
+          block_reason: 'uninstall attempt',
+          block_code: 'SELF_PROTECTION_UNINSTALL_001',
+        },
+        latency_ms: 1,
+      }
+      emitter.applyDecisionToEvent(event, decision)
+      expect(event.severity).toBe('critical')
+    })
+
+    it("maps the SPL 'extreme' severity onto the event vocabulary's 'critical'", () => {
+      const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
+      const decision: SecurityDecision = {
+        decision: 'block',
+        mode: 'enforce',
+        severity: 'extreme',
+        block_reason: 'x',
+        appealable: false,
+        intervention: undefined,
+        latency_ms: 0,
+      }
+      emitter.applyDecisionToEvent(event, decision)
+      expect(event.severity).toBe('critical')
+    })
+
+    it('does NOT stamp a severity on a non-block decision', () => {
+      // A severity on an allowed event would read as a finding that
+      // never happened.
+      const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
+      const decision: SecurityDecision = {
+        decision: 'allow',
+        mode: 'enforce',
+        severity: 'medium',
+        intervention: undefined,
+        latency_ms: 0,
+      }
+      emitter.applyDecisionToEvent(event, decision)
+      expect(event.severity).toBeUndefined()
+    })
+
+    it('preserves the mode_independent marker on the intervention', () => {
+      const event = emitter.makeBaseEvent('agent_tool_call', makeSession())
+      const decision: SecurityDecision = {
+        decision: 'block',
+        mode: 'enforce',
+        block_reason: 'uninstall attempt',
+        block_code: 'INLINE_SELF_PROTECTION_001',
+        appealable: false,
+        intervention: {
+          decision: 'deny',
+          decision_internal: 'block',
+          mode: 'enforce',
+          mode_independent: true,
+          block_reason: 'uninstall attempt',
+          block_code: 'INLINE_SELF_PROTECTION_001',
+        },
+        latency_ms: 0,
+      }
+      emitter.applyDecisionToEvent(event, decision)
+      expect(event.intervention?.mode_independent).toBe(true)
     })
 
     it('strips fail_strategy from the intervention payload (marketplace wire vocabulary)', () => {

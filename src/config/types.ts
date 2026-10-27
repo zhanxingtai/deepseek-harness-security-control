@@ -30,7 +30,21 @@ export interface NetworkCaptureConfig {
   enabled: boolean
   redactBodies: boolean
   captureResponseBody: boolean
+  /**
+   * RESPONSE body budget (bytes) for persisted `network_http` recv rows.
+   * Pre-split this single key bounded both directions; configs that only
+   * carry `maxBodyBytes` inherit it as the request budget too (see
+   * `inheritLegacyRequestBodyBudget` in normalize.ts).
+   */
   maxBodyBytes: number
+  /**
+   * REQUEST body budget (bytes) for persisted `network_http` send rows
+   * (e.g. LLM prompts). SPL / data-leak rule evaluation ALWAYS runs on
+   * the full pre-truncation body — this cap is persistence-only.
+   * Defaults to 64 KiB; falls back to the operator's `maxBodyBytes` when
+   * a legacy config does not set it.
+   */
+  maxRequestBodyBytes: number
   /**
    * SSE stream folding. For `text/event-stream` responses
    * keep the first N chunks and the last M chunks, replacing the middle with
@@ -41,6 +55,25 @@ export interface NetworkCaptureConfig {
   includeHosts: string[]
   excludeHosts: string[]
   excludeUrls: string[]
+  /**
+   * Noise-suppression prefix table for the OBSERVATION stream (the
+   * send/recv network_http events). Requests whose path prefix matches
+   * (case-insensitive, trailing-slash tolerant) are NOT emitted — the
+   * expensive body redaction / SSE fold is skipped entirely — but the
+   * policy engine still evaluates the raw body (blocking surface is
+   * untouched) and the sensitive-header guard still runs at the seam.
+   * Defaults cover the OpenAI-compatible LLM main link (`/v1/chat/
+   * completions`), Anthropic (`/v1/messages`) and OTLP telemetry
+   * (`/v1/logs|traces|metrics`) — vendor-neutral by path, not domain.
+   * Clearing this list disables the filter; the collector emits a
+   * one-shot config/warn audit row so the change is never silent.
+   */
+  ignoreUrls: string[]
+  /** Companion host table for `ignoreUrls` — exact host match
+   * (lowercased, trailing-dot stripped, optional `host:port` form).
+   * Default: `registry.npmjs.org`. Same suppression semantics as
+   * `ignoreUrls`. */
+  ignoreHosts: string[]
   sensitiveKeyPatterns: string[]
   /** : opt-in `dns.lookup` / `dns.resolve*` capture. */
   captureDns: boolean
@@ -53,6 +86,22 @@ export interface CollectorConfig {
   validateEvents: boolean
   /** : surfaced from implicit collector state — 50 MiB default. */
   maxFileBytes: number
+  /**
+   * Operator declaration: the audit log file's LIFECYCLE is owned by an
+   * external tool (a log rotator, a shipper, a volume manager).
+   *
+   * When `true`, a file-lifecycle anomaly — the log disappeared, shrank,
+   * or was swapped for another file — is treated as an expected lifecycle
+   * event: the sink re-baselines and logs a WARN instead of raising an
+   * `integrity/detect` gap.
+   *
+   * Default `false` (every anomaly is reported). Turn it on only when
+   * the rotation strategy cannot be recognised by the archive-sibling
+   * heuristic (e.g. `copytruncate`, or a rotator that moves the file to
+   * another directory). The trade-off is explicit: with the flag on, a
+   * hostile deletion of the audit trail is no longer reported.
+   */
+  externallyManagedLog: boolean
   /** Free disk space below which the collector emits a warn. Default 500 MiB. */
   diskWarnWatermarkBytes: number
   /** Free disk space below which the collector stops accepting events. Default 100 MiB. */
@@ -69,6 +118,13 @@ export interface CollectorConfig {
    * TypeScript code from compiling against a `false` value.
    */
   redactRawParams: true
+  /**
+   * Sliding-window content dedup for repetitive `security_audit` rows
+   * (policy reload heartbeats, watcher re-fires). Same target + same
+   * content hash within the window are merged into one emission's
+   * bookkeeping; a different hash always emits immediately. 0 disables.
+   */
+  auditDedupWindowMs: number
   /**
    * install / deploy diagnostic log path. Empty = disabled.
    * The path is auto-created and chmod 0o600 after every write.

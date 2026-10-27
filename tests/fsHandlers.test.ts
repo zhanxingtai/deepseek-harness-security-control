@@ -81,7 +81,6 @@ describe('ApplicationCollector fs/* handlers → file_read / file_write', () => 
     // Spec file_read: top-level `path` is the mandatory carrier.
     expect(observed.path).toBe('/tmp/example.txt')
     expect(observed.target_key).toBe('fs:1')
-    expect(observed.target_path).toBe('/tmp/example.txt')
     expect(observed.observation_kind).toBe('present')
     expect(observed.file_version).toBe('v-abc123')
     expect(observed.tool_name).toBe('file_read')
@@ -161,7 +160,6 @@ describe('ApplicationCollector fs/* handlers → file_read / file_write', () => 
     expect(observed.event_type).toBe('file_write')
     expect(observed.path).toBe('/tmp/edit.txt')
     expect(observed.target_key).toBe('fs:5')
-    expect(observed.target_path).toBe('/tmp/edit.txt')
     expect(observed.tool_name).toBe('edit')
     expect(observed.file_version).toBe('v-after')
     expect(observed.fs_write_intent).toEqual({ kind: 'replaceIfVersion', version: 'v-current' })
@@ -250,7 +248,6 @@ describe('ApplicationCollector fs/* handlers → file_read / file_write', () => 
       expect(intent.event_type).toBe('file_write')
       expect(intent.path).toBe('/tmp/orphan-write.txt')
       expect(intent.target_key).toBe('fs:99')
-      expect(intent.target_path).toBe('/tmp/orphan-write.txt')
       expect(intent.tool_name).toBe('write')
       expect(intent.fs_write_intent).toEqual({ kind: 'createIfAbsent' })
     } finally {

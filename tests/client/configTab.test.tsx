@@ -76,6 +76,7 @@ function buildSnapshot(): ConfigSnapshot {
       redactBodies: true,
       captureResponseBody: true,
       maxBodyBytes: 1_048_576,
+      maxRequestBodyBytes: 1024 * 1024,
       sseSummaryChunks: 5,
       sseSummaryLastChunks: 1,
       includeHosts: [],

@@ -347,6 +347,7 @@ describe('config.schema ( marketplace mirror)', () => {
       expect(config.runtimeHooks.logPath).toBe('~/.dsh/security-events-runtime.jsonl')
       expect(config.networkCapture.enabled).toBe(true)
       expect(config.networkCapture.maxBodyBytes).toBe(1024 * 1024)
+      expect(config.networkCapture.maxRequestBodyBytes).toBe(64 * 1024)
       expect(config.intervention.policyPath).toBe('~/.dsh/security-policy.spl.yaml')
       expect(config.intervention.policyPaths).toEqual([])
     })

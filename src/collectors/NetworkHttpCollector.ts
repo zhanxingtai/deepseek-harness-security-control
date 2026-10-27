@@ -65,8 +65,12 @@ interface EmitArgs {
   startTs: number
   code?: number
   responseBody?: string
+  /** Real response headers observed on the wire (http.request / fetch seams). */
+  responseHeaders?: Record<string, string | string[]>
   responseError?: string
   requestBodyText?: string
+  /** Pre-persistence size of the captured request body (eval-budget view). */
+  requestBodyOriginalLength?: number
   responseTruncated?: boolean
   responseOriginalLength?: number
   responseContentType?: string
@@ -141,6 +145,28 @@ export class NetworkHttpCollector {
   private includeHosts: Set<string>
   private excludeUrlRegexps: RegExp[]
   private sensitiveKeyPatterns: string[]
+  /**
+   * Noise-suppression tables (observation events only — blocking and the
+   * sensitive-header guard are NOT affected). `ignoreHosts` is a
+   * lowercased host Set (optional `host:port` form preserved);
+   * `ignoreUrlPrefixes` is a lowercased, trailing-slash-normalized path
+   * prefix list. Rebuilt by `rebuildDerivedMatcherState()` so a livePatch
+   * replacing the config arrays takes effect on the next request.
+   * Semantics are locked by tests/networkHttp.test.ts — the OpenClaw
+   * pre-filter/back-filter two-layer design collapses into one funnel
+   * here because emitEvent is the single egress for network_http events.
+   */
+  private ignoreHosts: Set<string>
+  private ignoreUrlPrefixes: string[]
+  /** Forensic counters for the suppression tables (OpenClaw-parity
+   * dropCounts): process-lifetime only, surfaced via `getDropCounts()`
+   * for tests and shutdown diagnostics. Never written to the event
+   * stream. */
+  private readonly dropCounts = { ignoredHost: 0, ignoredUrl: 0 }
+  /** One-shot guard for the "filter tables must never fail silently"
+   * audit — emitted once per process lifetime when BOTH tables are
+   * empty (operator cleared the defaults). */
+  private ignoreTablesEmptyAuditSent = false
   // Lowercased host Set of the sensitive-header guard's
   // `harnessPlaneHosts` allow-list. Out-of-frame requests to these hosts
   // skip the guard; everything else out-of-frame is guard-evaluated.
@@ -193,6 +219,8 @@ export class NetworkHttpCollector {
     this.includeHosts = new Set()
     this.excludeUrlRegexps = []
     this.sensitiveKeyPatterns = []
+    this.ignoreHosts = new Set()
+    this.ignoreUrlPrefixes = []
     this.harnessPlaneHosts = new Set()
     this.seedExemptHosts = new Set()
     this.discoveredHosts = new Set()
@@ -220,6 +248,10 @@ export class NetworkHttpCollector {
     this.includeHosts = new Set(this.config.includeHosts.map((h) => h.toLowerCase()))
     this.excludeUrlRegexps = this.config.excludeUrls.map((p) => new RegExp(p))
     this.sensitiveKeyPatterns = [...DEFAULT_SENSITIVE_KEYS, ...this.config.sensitiveKeyPatterns]
+    this.ignoreHosts = new Set(this.config.ignoreHosts.map((h) => h.trim().toLowerCase()))
+    this.ignoreUrlPrefixes = this.config.ignoreUrls
+      .map((p) => p.trim().toLowerCase().replace(/\/+$/, ''))
+      .filter((p) => p.length > 0)
     // Keep the guard's exemption Sets in the same
     // rebuild path so constructor and livePatch cannot drift. The
     // discovery half (discoveredHosts) is owned by the watcher and is
@@ -230,12 +262,12 @@ export class NetworkHttpCollector {
 
   /**
    * apply 🟢 networkCapture keys in place. Scalar
-   * thresholds (maxBodyBytes / sseSummary* / redactBodies /
-   * captureResponseBody / captureDns) are read per-request off the shared
-   * config reference; the array fields additionally rebuild the derived
-   * matcher state so the next request matches against the new lists.
-   * `enabled` is 🔴 at the classifier level (master switch) and never
-   * reaches this method from LivePatchManager.
+   * thresholds (maxBodyBytes / maxRequestBodyBytes / sseSummary* /
+   * redactBodies / captureResponseBody / captureDns) are read per-request
+   * off the shared config reference; the array fields additionally rebuild
+   * the derived matcher state so the next request matches against the new
+   * lists. `enabled` is 🔴 at the classifier level (master switch) and
+   * never reaches this method from LivePatchManager.
    */
   livePatch(patch: Record<string, unknown>): {
     ok: boolean
@@ -249,7 +281,7 @@ export class NetworkHttpCollector {
       const cfg = patch['networkCapture']
       if (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) {
         const c = cfg as Record<string, unknown>
-        const assignNumber = (field: 'maxBodyBytes' | 'sseSummaryChunks' | 'sseSummaryLastChunks'): void => {
+        const assignNumber = (field: 'maxBodyBytes' | 'maxRequestBodyBytes' | 'sseSummaryChunks' | 'sseSummaryLastChunks'): void => {
           if (typeof c[field] === 'number' && Number.isFinite(c[field])) {
             this.config[field] = c[field]
             appliedKeys.push(`networkCapture.${field}`)
@@ -262,12 +294,13 @@ export class NetworkHttpCollector {
           }
         }
         assignNumber('maxBodyBytes')
+        assignNumber('maxRequestBodyBytes')
         assignNumber('sseSummaryChunks')
         assignNumber('sseSummaryLastChunks')
         assignBool('redactBodies')
         assignBool('captureResponseBody')
         assignBool('captureDns')
-        const assignStrList = (field: 'includeHosts' | 'excludeHosts' | 'excludeUrls' | 'sensitiveKeyPatterns'): void => {
+        const assignStrList = (field: 'includeHosts' | 'excludeHosts' | 'excludeUrls' | 'ignoreUrls' | 'ignoreHosts' | 'sensitiveKeyPatterns'): void => {
           if (Array.isArray(c[field])) {
             this.config[field] = [
               ...(c[field] as unknown[]).filter((x): x is string => typeof x === 'string'),
@@ -278,6 +311,8 @@ export class NetworkHttpCollector {
         assignStrList('includeHosts')
         assignStrList('excludeHosts')
         assignStrList('excludeUrls')
+        assignStrList('ignoreUrls')
+        assignStrList('ignoreHosts')
         assignStrList('sensitiveKeyPatterns')
         if (
           appliedKeys.some(
@@ -285,6 +320,8 @@ export class NetworkHttpCollector {
               k === 'networkCapture.includeHosts' ||
               k === 'networkCapture.excludeHosts' ||
               k === 'networkCapture.excludeUrls' ||
+              k === 'networkCapture.ignoreUrls' ||
+              k === 'networkCapture.ignoreHosts' ||
               k === 'networkCapture.sensitiveKeyPatterns',
           )
         ) {
@@ -447,27 +484,38 @@ export class NetworkHttpCollector {
 
       const startTs = nowMs()
       const requestId = generateEventId()
+      // The request accumulator is capped at the RESPONSE budget
+      // (`maxBodyBytes`) — that cap is the rule-evaluation budget. The
+      // tighter `maxRequestBodyBytes` is applied PERSISTENCE-ONLY inside
+      // emitEvent, after SPL evaluation has seen the full text.
       const bodyAcc = new BodyAccumulator(this.config.maxBodyBytes)
       const session = getHttpRequestSessionContext() ?? this.sessionResolve()
 
       const wrappedResponse = (res: IncomingMessage): void => {
+        // Symmetric with the fetch seam: honour `captureResponseBody` here
+        // too (pre-fix the http.request seam accumulated + persisted the
+        // response regardless of the switch).
+        const captureResponse = this.config.captureResponseBody
         const respAcc = new BodyAccumulator(this.config.maxBodyBytes)
-        const responseContentType = getHeaderValue(
-          flattenHeaders(res.headers),
-          'content-type',
-        )
-        res.on('data', (chunk: unknown) => respAcc.append(chunk))
+        // Capture the REAL response headers once — they back the recv
+        // event's `headers` field (the send event carries the request
+        // headers; the two are distinct objects on the wire).
+        const responseHeaders = flattenHeaders(res.headers)
+        const responseContentType = getHeaderValue(responseHeaders, 'content-type')
+        res.on('data', (chunk: unknown) => { if (captureResponse) respAcc.append(chunk) })
         res.on('end', () => {
           void this.emitEvent({
             meta,
             requestId,
             startTs,
             code: res.statusCode,
-            responseBody: respAcc.string(),
-            responseTruncated: respAcc.truncated(),
-            responseOriginalLength: respAcc.original(),
+            responseBody: captureResponse ? respAcc.string() : undefined,
+            responseHeaders,
+            responseTruncated: captureResponse ? respAcc.truncated() : undefined,
+            responseOriginalLength: captureResponse ? respAcc.original() : undefined,
             responseContentType,
             requestBodyText: bodyAcc.string(),
+            requestBodyOriginalLength: bodyAcc.original(),
             session,
           })
         })
@@ -478,6 +526,7 @@ export class NetworkHttpCollector {
             startTs,
             responseError: err.message,
             requestBodyText: bodyAcc.string(),
+            requestBodyOriginalLength: bodyAcc.original(),
             session,
           })
         })
@@ -566,7 +615,7 @@ export class NetworkHttpCollector {
       const startTs = nowMs()
       const requestId = generateEventId()
       const session = getHttpRequestSessionContext() ?? this.sessionResolve()
-      const requestBodyText = await this.captureFetchBody(init?.body)
+      const { text: requestBodyText, originalLength: requestBodyOriginalLength } = await this.captureFetchBody(init?.body)
 
       let response: Response
       try {
@@ -578,6 +627,7 @@ export class NetworkHttpCollector {
           startTs,
           responseError: err instanceof Error ? err.message : String(err),
           requestBodyText,
+          requestBodyOriginalLength,
           session,
         })
         throw err
@@ -606,10 +656,13 @@ export class NetworkHttpCollector {
         startTs,
         code: response.status,
         responseBody,
+        // Real response headers — back the recv event's `headers` field.
+        responseHeaders: flattenHeaders(response.headers),
         responseTruncated,
         responseOriginalLength,
         responseContentType,
         requestBodyText,
+        requestBodyOriginalLength,
         session,
       })
       return response
@@ -778,7 +831,6 @@ export class NetworkHttpCollector {
       layer: 'application',
       source_layer: 'network',
       ts: now,
-      timestamp: now,
       pid: process.pid,
       collection_method: 'hook',
       protocol: 'udp',
@@ -804,21 +856,32 @@ export class NetworkHttpCollector {
     this.eventCollector.report(event)
   }
 
-  private async captureFetchBody(body: unknown): Promise<string | undefined> {
-    if (body === undefined || body === null) return undefined
-    if (typeof body === 'string') return body
-    if (Buffer.isBuffer(body)) return body.toString('utf8')
-    if (body instanceof Uint8Array) return Buffer.from(body).toString('utf8')
+  /**
+   * Capture the fetch REQUEST body. The returned `originalLength` is the
+   * pre-cap byte size; the text itself is capped at `maxBodyBytes` (the
+   * rule-evaluation budget) for the streaming carriers that need it.
+   * The persistence-only `maxRequestBodyBytes` cap is applied later in
+   * emitEvent — SPL evaluation must see the full text.
+   */
+  private async captureFetchBody(body: unknown): Promise<{ text: string | undefined; originalLength?: number }> {
+    if (body === undefined || body === null) return { text: undefined }
+    const finish = (raw: string, cap: boolean): { text: string; originalLength: number } => {
+      const originalLength = Buffer.byteLength(raw, 'utf8')
+      if (!cap) return { text: raw, originalLength }
+      const limited = limitPayloadSize(raw, this.config.maxBodyBytes)
+      return { text: limited.value as string, originalLength }
+    }
+    if (typeof body === 'string') return finish(body, false)
+    if (Buffer.isBuffer(body)) return finish(body.toString('utf8'), false)
+    if (body instanceof Uint8Array) return finish(Buffer.from(body).toString('utf8'), false)
     if (body instanceof Blob) {
       try {
-        const text = await body.text()
-        const limited = limitPayloadSize(text, this.config.maxBodyBytes)
-        return limited.value as string
+        return finish(await body.text(), true)
       } catch {
-        return '[unreadable Blob body]'
+        return { text: '[unreadable Blob body]' }
       }
     }
-    if (body instanceof URLSearchParams) return body.toString()
+    if (body instanceof URLSearchParams) return finish(body.toString(), false)
     if (body instanceof FormData) {
       // Progressive multipart summary — see
       // summarizeMultipartBody in src/utils/events/redact.ts. An opaque
@@ -829,17 +892,15 @@ export class NetworkHttpCollector {
       // call site so the await chains naturally.
       try {
         const summary = await summarizeMultipartBody(body)
-        const serialised = JSON.stringify(summary)
-        const limited = limitPayloadSize(serialised, this.config.maxBodyBytes)
-        return limited.value as string
+        return finish(JSON.stringify(summary), true)
       } catch {
-        return '[FormData body]'
+        return { text: '[FormData body]' }
       }
     }
     if (typeof (body as ReadableStream<unknown>).getReader === 'function') {
-      return '[ReadableStream body]'
+      return { text: '[ReadableStream body]' }
     }
-    return '[unreadable body]'
+    return { text: '[unreadable body]' }
   }
 
   private shouldSkip(host: string, path: string, requestUrl: string): boolean {
@@ -861,6 +922,77 @@ export class NetworkHttpCollector {
       if (re.test(path) || re.test(requestUrl)) return true
     }
     return false
+  }
+
+  /**
+   * Match a request against the noise-suppression tables. Returns the
+   * matched table kind ('host' | 'url') or null. Host entries match
+   * exactly (lowercased, trailing dot stripped; an entry containing ':'
+   * is an endpoint key that also requires the port). URL entries are
+   * path prefixes — case-insensitive and trailing-slash tolerant, so
+   * `/v1/chat/completions` covers `/v1/chat/completions/` and
+   * `/v1/chat/completions?stream=true`. Matching semantics are locked
+   * by tests/networkHttp.test.ts.
+   */
+  matchIgnoreTables(host: string, port: number | undefined, path: string): 'host' | 'url' | null {
+    if (this.ignoreHosts.size > 0 || this.ignoreUrlPrefixes.length > 0) {
+      const hostLower = host.toLowerCase().replace(/\.+$/, '')
+      const endpointKey = port !== undefined && port > 0 ? `${hostLower}:${port}` : hostLower
+      if (this.ignoreHosts.has(hostLower) || this.ignoreHosts.has(endpointKey)) return 'host'
+      const pathLower = path.toLowerCase()
+      for (const prefix of this.ignoreUrlPrefixes) {
+        if (pathLower === prefix || pathLower.startsWith(`${prefix}/`) || pathLower.startsWith(`${prefix}?`)) return 'url'
+      }
+    } else if (!this.ignoreTablesEmptyAuditSent) {
+      // "Filter disabled" must never be silent (OpenClaw hook-log-noise
+      // parity): both tables empty means the operator cleared the
+      // shipped defaults — surface it once per process lifetime.
+      this.ignoreTablesEmptyAuditSent = true
+      this.emitIgnoreTablesEmptyAudit()
+    }
+    return null
+  }
+
+  /** Test/diagnostic accessor for the suppression counters. */
+  getDropCounts(): Readonly<{ ignoredHost: number; ignoredUrl: number }> {
+    return { ...this.dropCounts }
+  }
+
+  /** One-shot `security_audit/config` row reporting that BOTH noise
+   * suppression tables are empty. Direct-append via the sink (never
+   * throws to the host); best-effort by contract. */
+  private emitIgnoreTablesEmptyAudit(): void {
+    try {
+      this.eventCollector.report({
+        comm: DEFAULT_PLATFORM_ID,
+        event_id: generateEventId(),
+        event_type: 'security_audit',
+        layer: 'application',
+        source_layer: 'network',
+        ts: nowMs(),
+        pid: process.pid,
+        ...buildHostMeta(),
+        collection_method: 'agent_api',
+        audit_category: 'config',
+        audit_action: 'warn',
+        severity: 'medium',
+        summary: 'networkCapture ignore tables are empty — LLM/telemetry noise filter disabled',
+        reason: 'operator cleared networkCapture.ignoreUrls and ignoreHosts',
+        audit_details: {
+          event_type_alias: 'ignore_tables_empty',
+          ignore_urls: this.config.ignoreUrls,
+          ignore_hosts: this.config.ignoreHosts,
+        },
+        source: 'sst-security-control-dsh.network-http-collector.0.4.0',
+        collector: {
+          hook_name: 'network_http_ignore_tables',
+          middleware_name: DEFAULT_PLATFORM_ID,
+          collector_name: 'network-http-collector',
+        },
+      } as SecurityEvent)
+    } catch {
+      /* best-effort — the warning must never break the request path */
+    }
   }
 
   /**
@@ -1028,7 +1160,6 @@ export class NetworkHttpCollector {
       layer: 'application',
       source_layer: 'network',
       ts: now,
-      timestamp: now,
       pid: process.pid,
       // The sink validator requires host_id/container_id;
       // without buildHostMeta() every block audit would be silently DROPPED
@@ -1038,10 +1169,10 @@ export class NetworkHttpCollector {
       audit_category: 'integrity',
       audit_action: 'detect',
       severity: 'high',
-      // `summary` keeps the audit human-readable. The matched header VALUE
+      // `reason` keeps the audit human-readable. The matched header VALUE
       // stays out of it (sensitive); value_preview is already in
       // audit_details.
-      summary:
+      reason:
         `sensitive header '${matchedKey}' ${outcome === 'blocked' ? 'blocked on outbound request' : 'allowed under audit-only posture'}`,
       outcome,
       blocked: outcome === 'blocked',
@@ -1089,19 +1220,72 @@ export class NetworkHttpCollector {
   }
 
   private async emitEvent(args: EmitArgs): Promise<void> {
-    const { meta, requestId, startTs, code, responseBody, responseError, responseTruncated, responseOriginalLength, responseContentType, requestBodyText, session } = args
+    const { meta, requestId, startTs, code, responseBody, responseHeaders, responseError, responseTruncated, responseOriginalLength, responseContentType, requestBodyText, requestBodyOriginalLength, session } = args
 
     const originalRequestBody = requestBodyText ?? ''
-    const headersForEvent = redactSensitiveBody(meta.headers, this.sensitiveKeyPatterns)
+
+    // Noise suppression (LLM provider / telemetry traffic): matched
+    // requests never become send/recv observation events and skip the
+    // expensive redaction/SSE-fold work below. The BLOCKING surface is
+    // preserved — the policy engine still evaluates the raw body here,
+    // and a non-allow decision falls through to full event emission so
+    // audits can see the intervention. The sensitive-header guard runs
+    // at the capture seams (before emitEvent) and is unaffected.
+    const suppressedKind = this.matchIgnoreTables(meta.host, meta.port, meta.path)
+    let evaluatedDecision: Awaited<ReturnType<NonNullable<InterventionEngine>['evaluateHttp']>> | undefined
+    let decisionEvaluated = false
+    if (suppressedKind !== null) {
+      if (this.interventionEngine) {
+        try {
+          evaluatedDecision = await this.interventionEngine.evaluateHttp(
+            this.buildInterventionContext(meta, originalRequestBody, session),
+            { toolActive: typeof session?.toolCallId === 'string' && session.toolCallId.length > 0 },
+          )
+          decisionEvaluated = true
+        } catch {
+          // Policy evaluation must never break the host request —
+          // same swallow contract as the emission path below.
+        }
+      }
+      const blocked = evaluatedDecision !== undefined && evaluatedDecision.decision !== 'allow'
+      if (!blocked) {
+        this.dropCounts[suppressedKind === 'host' ? 'ignoredHost' : 'ignoredUrl'] += 1
+        return
+      }
+      // Non-allow on an ignored target: fall through and emit the full
+      // event with the already-computed decision (no re-evaluation).
+    }
+
+    // Request headers redacted + bounded once — they back the send event's
+    // `headers`.
+    const requestHeadersForEvent = this.limitHeaders(
+      redactSensitiveBody(meta.headers, this.sensitiveKeyPatterns),
+    )
+    // Response headers are captured at the seam (res.headers / response.headers).
+    // On request-error paths there IS no response — recv.headers stays absent
+    // rather than falling back to a copy of the request headers.
+    const responseHeadersForEvent = responseHeaders
+      ? this.limitHeaders(redactSensitiveBody(responseHeaders, this.sensitiveKeyPatterns))
+      : undefined
     // D4 — the previous `redactHttpBody` only handled
     // JSON bodies. Form-urlencoded (`token=xxx&user=alice`) and raw
     // bytes (Bearer / AKIA / PEM) were passing through unmasked —
     // the last invariant #6 leak in the HTTP body path. The helper
     // returns the structured `{ body, redactedKeys }` so we can
     // surface `body_redacted_keys` on the audit row.
+    //
+    // INVARIANT — evaluate-before-truncate: `originalRequestBody` (the
+    // input to `redactHttpBody`, the SPL context built below, and the
+    // body-redaction key scan) is the FULL captured text (eval budget =
+    // `maxBodyBytes`). The tighter `maxRequestBodyBytes` cap is applied
+    // PERSISTENCE-ONLY here, AFTER evaluation. Swapping this order would
+    // let a >64 KiB request hide a data-leak signature from SPL rules
+    // (locked by tests/networkHttp.test.ts).
     const requestBodyRedaction = redactHttpBody(originalRequestBody)
     const requestBodyForEvent = requestBodyRedaction.body
-    const limitedRequestBody = limitPayloadSize(requestBodyForEvent, this.config.maxBodyBytes)
+    const limitedRequestBody = limitPayloadSize(requestBodyForEvent, this.config.maxRequestBodyBytes)
+    const requestOriginalLength = requestBodyOriginalLength ?? limitedRequestBody.originalLength
+    const requestBodyTruncated = requestOriginalLength > this.config.maxRequestBodyBytes
 
     // invariant #6 leak: `meta.path` and
     // `meta.requestUrl` were written verbatim, so a fetch to
@@ -1152,7 +1336,6 @@ export class NetworkHttpCollector {
       layer: 'application',
       source_layer: 'network',
       ts: now,
-      timestamp: now,
       pid: process.pid,
       collection_method: 'hook',
       request_id: requestId,
@@ -1185,38 +1368,46 @@ export class NetworkHttpCollector {
     }
 
     // The platform event schema requires both `send` and `recv`
-    // directions. The `send` event captures the request plus a mirrored copy
-    // of the response summary (preserves existing consumer expectations); the
-    // `recv` event captures the response. They share `request_id` for correlation.
+    // directions. The `send` event captures the REQUEST only — at send
+    // time there is no response, so it carries no `code` / `latency_ms`
+    // / response-content fields (those were semantically misplaced here).
+    // The `recv` event captures the response: status code, latency, real
+    // response headers, and the response on its `body` field. They share
+    // `request_id` for correlation.
     //
-    // `headers` is the structured object required by the
-    // platform per-type validator (`event-schema/network.json` anyOf branch);
-    // emit only `headers` here.
+    // `headers` is per-direction: send gets the redacted request headers,
+    // recv gets the redacted response headers actually observed on the
+    // wire. `code` normalises to integer|null per the platform network
+    // contract.
+    const eventCode = normalizeHttpCode(code)
     const sendEvent: SecurityEvent = {
       ...baseEvent,
       event_id: generateEventId(),
       direction: 'send',
-      code,
-      latency_ms: latencyMs,
-      headers: headersForEvent,
+      headers: requestHeadersForEvent.value,
+      ...(requestHeadersForEvent.truncated ? { headers_truncated: true } : {}),
+      ...(requestHeadersForEvent.truncated ? { headers_original_length: requestHeadersForEvent.originalLength } : {}),
       body: limitedRequestBody.value,
-      response_body: finalResponseBody,
-      content_length: Buffer.byteLength(finalResponseBody, 'utf8'),
-      content_truncated: contentTruncated || undefined,
-      content_original_length: contentTruncated ? contentOriginalLength : undefined,
-      response_body_chunks_total: sseSummary.chunksTotal,
-      response_body_chunks_kept: sseSummary.chunksKept,
+      // Request-content markers (the recv row's same-named fields describe
+      // the RESPONSE body — the budgets are per-direction since the
+      // maxRequestBodyBytes split).
+      content_length: Buffer.byteLength(limitedRequestBody.value, 'utf8'),
+      content_truncated: requestBodyTruncated || undefined,
+      content_original_length: requestBodyTruncated ? requestOriginalLength : undefined,
     }
 
     const recvEvent: SecurityEvent = {
       ...baseEvent,
       event_id: generateEventId(),
       direction: 'recv',
-      code,
+      code: eventCode,
       latency_ms: latencyMs,
-      headers: headersForEvent,
+      // Absent when no response arrived (request error) — never a copy
+      // of the request headers.
+      ...(responseHeadersForEvent ? { headers: responseHeadersForEvent.value } : {}),
+      ...(responseHeadersForEvent?.truncated ? { headers_truncated: true } : {}),
+      ...(responseHeadersForEvent?.truncated ? { headers_original_length: responseHeadersForEvent.originalLength } : {}),
       body: finalResponseBody,
-      response_body: finalResponseBody,
       content_length: Buffer.byteLength(finalResponseBody, 'utf8'),
       content_truncated: contentTruncated || undefined,
       content_original_length: contentTruncated ? contentOriginalLength : undefined,
@@ -1235,10 +1426,16 @@ export class NetworkHttpCollector {
         // but not evaluated. In-window evaluations go through the engine's
         // TTL decision cache (evaluateHttp), which preserves the 50ms
         // cooperative deadline and failStrategy semantics.
-        const decision = await this.interventionEngine.evaluateHttp(
-          this.buildInterventionContext(meta, originalRequestBody, session),
-          { toolActive: typeof session?.toolCallId === 'string' && session.toolCallId.length > 0 },
-        )
+        //
+        // Suppressed (ignored) targets that reached this point carry a
+        // decision computed at the suppression gate — reuse it instead
+        // of evaluating twice.
+        const decision = decisionEvaluated
+          ? evaluatedDecision
+          : await this.interventionEngine.evaluateHttp(
+              this.buildInterventionContext(meta, originalRequestBody, session),
+              { toolActive: typeof session?.toolCallId === 'string' && session.toolCallId.length > 0 },
+            )
         if (decision && decision.decision !== 'allow') {
           sendEvent.blocked = decision.decision === 'block'
           sendEvent.block_reason = decision.block_reason
@@ -1256,7 +1453,12 @@ export class NetworkHttpCollector {
                 block_code: decision.block_code,
                 appealable: decision.appealable,
               }
-          if (decision.risk_signal) sendEvent.risk_assessment = decision.risk_signal
+          if (decision.risk_signal && !sendEvent.intervention.risk_assessment) {
+            // Single-copy invariant: risk_signal lives on
+            // `intervention.risk_assessment` ONLY — never a top-level
+            // event.risk_assessment (was a third duplicate layer).
+            sendEvent.intervention.risk_assessment = decision.risk_signal
+          }
         }
       } catch (err) {
         // Policy evaluation must never break the host request. Log is best-effort
@@ -1270,10 +1472,41 @@ export class NetworkHttpCollector {
     recvEvent.blocked = sendEvent.blocked
     recvEvent.block_reason = sendEvent.block_reason
     recvEvent.intervention = sendEvent.intervention
-    recvEvent.risk_assessment = sendEvent.risk_assessment
 
     this.eventCollector.report(sendEvent)
     this.eventCollector.report(recvEvent)
+  }
+
+  /**
+   * Bound a per-direction headers object the same way bodies are bounded:
+   * measure the JSON-serialised byte size against `maxBodyBytes` and, when
+   * over budget, drop trailing entries until the remainder fits. The
+   * `headers_truncated` / `headers_original_length` marker pair mirrors the
+   * body-side `content_truncated` / `content_original_length` convention so
+   * audit consumers can reconstruct the full header set from the wire log.
+   * Entry order is the on-the-wire order (IncomingMessage insertion order /
+   * fetch `Headers` iteration order), so the drop order is deterministic.
+   */
+  private limitHeaders(headers: Record<string, string | string[]>): {
+    value: Record<string, string | string[]>
+    truncated: boolean
+    originalLength: number
+  } {
+    const originalLength = Buffer.byteLength(JSON.stringify(headers), 'utf8')
+    if (originalLength <= this.config.maxBodyBytes) {
+      return { value: headers, truncated: false, originalLength }
+    }
+    const entries = Object.entries(headers)
+    let kept = entries.length
+    while (kept > 0) {
+      const candidate: Record<string, string | string[]> = {}
+      for (let i = 0; i < kept; i++) candidate[entries[i]![0]] = entries[i]![1]!
+      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= this.config.maxBodyBytes) {
+        return { value: candidate, truncated: true, originalLength }
+      }
+      kept--
+    }
+    return { value: {}, truncated: true, originalLength }
   }
 
   private buildInterventionContext(
@@ -1373,6 +1606,18 @@ interface SseSummary {
   chunksTotal?: number
   chunksKept?: number
   folded: boolean
+}
+
+/**
+ * Normalize an HTTP response status to the platform wire type
+ * (`integer | null` per `event-schema/network.json`). Unknown / absent
+ * statuses become JSON null instead of being dropped, so consumers can
+ * distinguish "no response" from "response without a parsed code".
+ */
+function normalizeHttpCode(code: number | undefined): number | null {
+  if (code === undefined || code === null) return null
+  const n = Number(code)
+  return Number.isFinite(n) ? Math.trunc(n) : null
 }
 
 function foldSseStream(body: string, keepHead: number, keepTail: number): SseSummary {

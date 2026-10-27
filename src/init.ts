@@ -17,7 +17,7 @@ import { runConfigIntegrityCheck } from './utils/configIntegrity.js'
 import { checkPreloadEnv } from './index.js'
 import { DebugLog } from './utils/debugLog.js'
 import { validateConfig } from './config.schema.js'
-import { normalizeConfig, isModeExplicit, type Config as ConfigShape } from './config.js'
+import { normalizeConfig, inheritLegacyRequestBodyBudget, isModeExplicit, type Config as ConfigShape } from './config.js'
 import { applyDraftToConfig, readDraftFile, resolveDraftPath } from './config/draft.js'
 
 export interface InitResult {
@@ -126,7 +126,12 @@ export function initializePluginContext(ctx: Context, rawConfig: unknown): InitR
   // union, hostname fallback, networkCapture scanIntervalMs clamp).
   // On failure the plugin falls back to `normalizeConfig(rawConfig)`
   // directly with a single warn.
-  const schemaValidated = validateConfig(rawConfig)
+  // Legacy request-budget inheritance must run BEFORE Schemastery
+  // validation: the Schema carries the 64 KiB default for
+  // `maxRequestBodyBytes`, which would otherwise mask a legacy config's
+  // intent (`maxBodyBytes` only) and silently shrink its request budget.
+  const rawForValidation = inheritLegacyRequestBodyBudget(rawConfig)
+  const schemaValidated = validateConfig(rawForValidation)
   if (schemaValidated === undefined) {
     ctx.logger.warn(
 '[SecurityMonitor] Schemastery Config validation failed; '+

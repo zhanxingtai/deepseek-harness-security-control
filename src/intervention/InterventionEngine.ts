@@ -402,20 +402,16 @@ export interface RuntimeHookSessionContext {
   runId: string
   agentId?: string
   /**
-   * Explicit task identifier. Today equals `sessionId` (one agent
-   * session == one logical task in the harness runtime); surfaced
-   * separately so audit consumers don't have to re-parse it out of
-   * `runId`. Stamped onto every runtime_*_intent event so a
-   * `pnpm dsh web` style spawn carrying a fragment-variable attack can
-   * be tied back to the agent task that triggered it.
+   * Explicit task identifier, when a producer upstream can supply a REAL
+   * one. Never derived from `sessionId` — the platform identity rule
+   * forbids a task_id that duplicates session_id (SOC false
+   * correlation), so absent a genuine task id this stays undefined and
+   * the wire events write null.
    */
   taskId?: string
   /**
-   * Monotonic turn identifier within a task. Mirrors the `runId` shape
-   * (`${sessionId}-${turn}`); the dedicated field lets dashboards that
-   * want a short turn token (without the session prefix) avoid
-   * re-parsing. Stamped alongside `task_id` on every runtime_*_intent
-   * event.
+   * Monotonic turn identifier within a task. Same rule as `taskId`:
+   * never a mirror of `runId`; undefined → null on the wire.
    */
   turnId?: string
 }

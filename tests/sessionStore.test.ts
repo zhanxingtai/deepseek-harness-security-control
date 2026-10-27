@@ -150,6 +150,53 @@ describe('SessionStore', () => {
     })
   })
 
+  describe('recordSessionTitle', () => {
+    it('applies the title to a live session context (last-wins on rename)', () => {
+      const session = store.getOrCreateSession('s-1', makeAgent())
+      store.recordSessionTitle('s-1', 'fix auth bug')
+      expect(session.sessionTitle).toBe('fix auth bug')
+      store.recordSessionTitle('s-1', 'rename: auth refactor')
+      expect(session.sessionTitle).toBe('rename: auth refactor')
+    })
+
+    it('queues the title for a session that does not exist yet', () => {
+      store.recordSessionTitle('s-2', 'resumed session title')
+      const session = store.getOrCreateSession('s-2')
+      expect(session.sessionTitle).toBe('resumed session title')
+      // The pending entry is consumed on application — repeated reads
+      // return the cached context value, nothing resurrects from the queue.
+      expect(store.getOrCreateSession('s-2')).toBe(session)
+    })
+
+    it('prunes queued titles for sessions that never materialize past the TTL', () => {
+      store.recordSessionTitle('s-4', 'orphan title')
+      // Force the pending timestamp back beyond the TTL window, then sweep.
+      const pending = (store as unknown as { pendingSessionTitles: Map<string, { ts: number }> }).pendingSessionTitles
+      pending.set('s-4', { ts: nowMs() - applicationConfig.sessionTtlMs - 1 })
+      store.evictStaleSessions()
+      expect(pending.has('s-4')).toBe(false)
+      expect(store.getOrCreateSession('s-4').sessionTitle).toBeUndefined()
+    })
+
+    it('ignores empty and non-string titles', () => {
+      const session = store.getOrCreateSession('s-5', makeAgent())
+      store.recordSessionTitle('s-5', '')
+      store.recordSessionTitle('s-5', undefined)
+      store.recordSessionTitle('s-5', 42)
+      expect(session.sessionTitle).toBeUndefined()
+    })
+
+    it('drops queued titles when the owning session is evicted', () => {
+      store.recordSessionTitle('s-6', 'pending title')
+      const session = store.getOrCreateSession('s-6')
+      session.lastUserMessageAt = nowMs() - applicationConfig.sessionTtlMs - 1
+      store.evictStaleSessions()
+      expect(store.getSession('s-6')).toBeUndefined()
+      // A brand-new context for the same id must NOT resurrect the evicted title.
+      expect(store.getOrCreateSession('s-6').sessionTitle).toBeUndefined()
+    })
+  })
+
   describe('evictStaleSessions', () => {
     it('drops sessions whose lastUserMessageAt is older than sessionTtlMs', () => {
       const session = store.getOrCreateSession('s-1')

@@ -60,6 +60,7 @@ pnpm dsh plugin --profile web remove sst-security-control-dsh
 | `intervention.mode` | `enforce` | Policy enforcement mode: `audit` (record only) or `enforce` (block). |
 | `enabled` | `true` | Master switch |
 | `collector.localOutputPath` | `~/.dsh/security-events.jsonl` | Event log path |
+| `collector.externallyManagedLog` | `false` | Declare the audit log's rotation/deletion is handled by an external tool; file-lifecycle anomalies are then warned about, not reported as integrity gaps |
 | `runtimeHooks.enabledAtSubprocess` | `true` | Enable subprocess spawn interception |
 | `runtimeHooks.blockAtSubprocess` | `false` | Block denied subprocesses when running in `enforce` mode |
 | `intervention.failStrategy` | `fail_open` | Behaviour when the intervention engine fails or times out (`fail_open` = allow, `fail_closed` = block) |

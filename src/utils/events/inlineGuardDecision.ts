@@ -50,6 +50,13 @@ export function buildInlineGuardDecision(
       decision: toMarketplaceDecision('block'),
       decision_internal: 'block',
       mode: 'enforce',
+      // The verdict stands regardless of the runtime mode: an inline
+      // safety net is not a policy rule, so `intervention.mode:
+      // 'audit'` does not soften it. The marker lets a consumer
+      // reading `policy_evaluation.mode` (the runtime posture) tell
+      // "denied in audit mode, by design" apart from a mislabelled
+      // row.
+      mode_independent: true,
       policy_id: identity.policyId,
       policy_name: identity.policyName,
       block_reason: reason,

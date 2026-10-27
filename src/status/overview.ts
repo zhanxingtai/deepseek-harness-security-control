@@ -197,7 +197,7 @@ export function toBlockRow(
   const isAuditRow = raw['event_type'] === 'security_audit'
   // 审计行(security_audit)没有 intervention 块,语义全部靠顶层
   // 字段承载: audit_action(tamper/detect/modify/...) 进决策侧的
-  // 旁路列, severity 进等级列, block_reason / summary 进原因列。
+  // 旁路列, severity 进等级列, block_reason / reason 进原因列。
   // decision 列保持 'unknown' —— 审计发现不是一次干预,不该被渲染
   // 成 block 徽章。
   const auditAction = typeof raw['audit_action'] === 'string' ? raw['audit_action'] : undefined
@@ -235,15 +235,15 @@ export function toBlockRow(
     decision: intervention?.decision ?? 'unknown',
     decision_internal: intervention?.decision_internal ?? (isAuditRow ? auditAction : undefined),
     // 审计行的原因列:回退取 顶层 block_reason(security_audit
-    // 事件直接落盘该字段,比 summary 更精炼) / summary
-    // (一句话描述),否则前端只能显示 'unknown'。策略列回退
-    // audit_details.policy_id。
+    // 事件直接落盘该字段,比 reason 更精炼) / reason
+    // (security_audit 规范字段,一句话描述),否则前端只能显示
+    // 'unknown'。策略列回退 audit_details.policy_id。
     block_reason:
       intervention?.block_reason ??
       (typeof raw['block_reason'] === 'string'
         ? raw['block_reason']
-        : typeof raw['summary'] === 'string'
-          ? raw['summary']
+        : typeof raw['reason'] === 'string'
+          ? raw['reason']
           : undefined),
     block_code: intervention?.block_code,
     policy_id:

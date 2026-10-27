@@ -398,6 +398,19 @@ export class ApplicationCollector {
 
   // --- Cordis event handlers ------------------------------------------------
 
+  /** `session/event` listener (handlers.ts). Only `session/title` is
+   *  consumed: the harness appends one each time a session's display
+   *  title is assigned or renamed (fallback → LLM → user rename,
+   *  last-wins on the host side). The title is cached on the session
+   *  context and stamped onto the session's subsequent events by
+   *  `makeBaseEvent`. Best-effort per the never-throw invariant. */
+  onSessionTitleEvent(session: { header?: { id?: unknown } }, event: { type?: unknown; data?: { title?: unknown } }): void {
+    if (event?.type !== 'session/title') return
+    const sessionId = session?.header?.id
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return
+    this.sessionStore.recordSessionTitle(sessionId, event.data?.title)
+  }
+
   onAgentSessionStart({ agent, source }: AgentCreatedPayload): void {
     const sessionId = agent.session.header.id
     const sessionContext = this.getOrCreateSession(sessionId, agent)
@@ -528,15 +541,15 @@ export class ApplicationCollector {
 
     // Stamp the most-recent session so RuntimeHook can correlate spawns
     // that lack the `exec` reference. Captured BEFORE stepIndex++ so the
-    // first pre-execute in a session is recorded. Also stamp the explicit
-    // task_id / turn_id aliases so the runtime_*_intent events carry them
-    // without RuntimeHook having to re-derive them from session_id / run_id.
+    // first pre-execute in a session is recorded. taskId / turnId are
+    // deliberately NOT derived from sessionId / runId — the platform
+    // identity rule forbids writing a task_id that duplicates session_id
+    // (SOC false correlation), so the fields stay unset and RuntimeHook
+    // writes null on the wire.
     this.sessionStore.setMostRecentSession({
       sessionId: sessionContext.sessionId,
       runId: sessionContext.runId,
       agentId: sessionContext.agentId,
-      taskId: sessionContext.sessionId,
-      turnId: sessionContext.runId,
     })
     // Record the harness process pid for this session so system-layer scans
     // can correlate spawned/descendant processes.
@@ -554,29 +567,23 @@ export class ApplicationCollector {
     // change, no behavior shift on the masked values themselves), but the
     // side-channel list feeds `event.redacted_keys` for the platform audit
     // contract.
-    const { result: maskedParams, redactedKeys: paramsKeys } = redactAndCollectKeys(
+    const { redactedKeys: paramsKeys } = redactAndCollectKeys(
       safeExtractRecord(exec.arguments),
     )
-    event.params = maskedParams
     // `tool_params` is the platform audit contract carrier. Marketplace form
     // honours `collector.redactRawParams` (default true) so sensitive keys
     // are masked on persist. When `redactRawParams: false`, the verbatim
-    // JSON lands on `tool_params` for forensic replay; the operator's
-    // call is recorded on `redacted: false` in the `params_redaction`
-    // side-channel.
+    // JSON lands on `tool_params` for forensic replay. The sha256 + byte
+    // length of the ORIGINAL raw JSON ride on `raw_params_hash` /
+    // `raw_params_length` (platform agent contract) so audit consumers can
+    // fingerprint the unredacted payload without storing it.
     const rawParamsJson = JSON.stringify(exec.arguments ?? {})
     const redacted = redactRawParams(rawParamsJson, {
       enabled: this.collectorConfig.redactRawParams,
     })
     event.tool_params = redacted.value
-    // `redacted_keys` is set after the user_prompt redaction below so the
-    // union list includes both params-side and prompt-side hits.
-    event.params_redaction = {
-      enabled: this.collectorConfig.redactRawParams,
-      redacted: redacted.redacted,
-      raw_size_bytes: redacted.size,
-      raw_hash_sha256: redacted.hash,
-    }
+    event.raw_params_hash = redacted.hash
+    event.raw_params_length = redacted.size
     // Also cap the user_prompt surfaced on tool_call events (a single
     // multi-MB user prompt would otherwise ride on every tool event until
     // session expiry). Per invariant #6, redact
@@ -593,12 +600,9 @@ export class ApplicationCollector {
       event.user_prompt_truncated = true
       event.user_prompt_original_length = promptCapped.originalLength
     }
-    // Surface the user_prompt-side hits on a dedicated field so audit
-    // consumers can tell which sub-emitter (params vs. prompt) fired
-    // without diffing the union `redacted_keys` list.
-    event.user_prompt_redacted_keys = promptRedaction.redactedKeys
-    // Merge into the union `redacted_keys` so the existing consumer
-    // contract (single flat array of all masked keys) still holds.
+    // Merge the user_prompt-side hits into the union `redacted_keys`
+    // list (single flat array of all masked keys across the params and
+    // prompt sub-emitters) — the platform contract field.
     event.redacted_keys = [
       ...paramsKeys,
       ...redacted.redactedKeys,
@@ -749,7 +753,6 @@ export class ApplicationCollector {
     event.tool_kind = 'native'
     event.duration = duration
     event.execution_duration_ms = duration
-    event.execution_status = result.isError ? 'failure' : 'success'
     event.status = result.isError ? 'failure' : 'success'
 
     if (result.isError) {
@@ -782,10 +785,18 @@ export class ApplicationCollector {
 
     this.stampSource(event, { hook_name: 'agent_tool_result', middleware_name: DEFAULT_PLATFORM_ID, collector_name: 'application-collector' })
 
-    // Track in session context for chain matching.
+    // Track in session context for chain matching. The structured args
+    // are re-parsed from `tool_params` (the only wire carrier) so the
+    // in-memory chain record mirrors what was persisted.
+    let previousActionParams: unknown
+    try {
+      previousActionParams = JSON.parse(event.tool_params ?? '{}')
+    } catch {
+      previousActionParams = {}
+    }
     sessionContext.previousActions.push({
       tool: exec.name,
-      params: event.params,
+      params: previousActionParams,
       result_status: event.status,
       timestamp: nowMs(),
     })
@@ -871,7 +882,6 @@ export class ApplicationCollector {
     const event = this.makeBaseEvent(isWrite ? 'file_write' : 'file_read', sessionContext)
     event.path = target.displayPath
     event.target_key = target.targetKey
-    event.target_path = target.displayPath
     event.observation_kind = observation.kind
     if (observation.kind === 'present') {
       event.file_version = observation.version
@@ -916,7 +926,6 @@ export class ApplicationCollector {
       const event = this.makeBaseEvent('file_write', sessionContext)
       event.path = intent.displayPath
       event.target_key = key
-      event.target_path = intent.displayPath
       event.tool_name = intent.toolName
       event.fs_write_intent =
         intent.kind === 'replaceIfVersion'
@@ -1041,8 +1050,8 @@ export class ApplicationCollector {
     return {
       actionType: 'message_write',
       body: event.content,
-      sessionId: event.session_id,
-      runId: event.run_id,
+      sessionId: event.session_id ?? undefined,
+      runId: event.run_id ?? undefined,
       agentId: session?.agentId,
       platformId: DEFAULT_PLATFORM_ID,
       userPrompt: session?.userPrompt,
@@ -1132,7 +1141,7 @@ export class ApplicationCollector {
    *     post-hoc dashboards
    *
    * The audit event shares the session identity of the calling tool
-   * (best-effort — falls back to `'__plugin__'` when the session was
+   * (best-effort — falls back to null when the session was
    * already evicted between record + emit). Best-effort is sufficient
    * because the detector is observability-only and never blocks.
    */
@@ -1146,19 +1155,17 @@ export class ApplicationCollector {
         layer: 'application',
         source_layer: 'application',
         ts: hit.windowEnd,
-        timestamp: hit.windowEnd,
         pid: process.pid,
         collection_method: 'agent_api',
         session_id: sessionContext?.sessionId ?? hit.sessionId,
         run_id: sessionContext?.runId ?? hit.sessionId,
-        agent_id: sessionContext?.agentId ?? '__plugin__',
+        agent_id: sessionContext?.agentId ?? null,
         tool_name: hit.toolName,
         audit_category: 'behavior',
         audit_action: 'detect',
         severity: 'medium',
-        summary: `per-tool loop detected: ${hit.toolName} ${hit.count}/${hit.threshold} in ${Math.round(hit.windowMs / 1000)}s window`,
+        reason: `per-tool loop detected: ${hit.toolName} ${hit.count}/${hit.threshold} in ${Math.round(hit.windowMs / 1000)}s window`,
         outcome: 'success',
-        reason: 'detect',
         audit_details: {
           event_type_alias: 'looped_tool',
           tool_name: hit.toolName,
@@ -1196,7 +1203,7 @@ export class ApplicationCollector {
    *     token dashboards can consume them without cracking `audit_details`
    *
    * Session identity is best-effort (falls back to the detector key and
-   * `'__plugin__'`) — the detector is observability-only and never blocks.
+   * null) — the detector is observability-only and never blocks.
    */
   private emitAnomalousTokenUsageAudit(hit: TokenUsageHit): void {
     try {
@@ -1208,21 +1215,19 @@ export class ApplicationCollector {
         layer: 'application',
         source_layer: 'application',
         ts: hit.ts,
-        timestamp: hit.ts,
         pid: process.pid,
         collection_method: 'agent_api',
         session_id: sessionContext?.sessionId ?? hit.sessionId,
         run_id: sessionContext?.runId ?? hit.sessionId,
-        agent_id: sessionContext?.agentId ?? '__plugin__',
+        agent_id: sessionContext?.agentId ?? null,
         audit_category: 'behavior',
         audit_action: 'detect',
         severity: 'medium',
-        summary:
+        reason:
           `anomalous token usage: ${hit.usage.totalTokens} tokens is ` +
           `${hit.ratio.toFixed(2)}x the ${Math.round(hit.baseline)}-token baseline ` +
           `(${hit.sampleCount} samples in ${Math.round(hit.windowMs / 1000)}s window)`,
         outcome: 'success',
-        reason: 'detect',
         token_usage_prompt: hit.usage.inputTokens,
         token_usage_completion: hit.usage.outputTokens,
         token_usage_total: hit.usage.totalTokens,
@@ -1281,8 +1286,8 @@ export class ApplicationCollector {
    *     variable values into a long-lived audit log
    *
    * Session identity is best-effort — handler errors often happen
-   * before any session context exists, so we fall back to `'__plugin__'`
-   * and the plugin-level agent_id. Best-effort is sufficient because
+   * before any session context exists, so we fall back to null identity
+   * per the platform rule. Best-effort is sufficient because
    * the audit is observability-only and never blocks.
    */
   emitFailSafeAudit(handlerName: string, error: unknown): void {
@@ -1300,18 +1305,16 @@ export class ApplicationCollector {
         layer: 'application',
         source_layer: 'application',
         ts,
-        timestamp: ts,
         pid: process.pid,
         collection_method: 'agent_api',
-        session_id: '__plugin__',
-        run_id: '__plugin__',
-        agent_id: '__plugin__',
+        session_id: null,
+        run_id: null,
+        agent_id: null,
         audit_category: 'runtime',
         audit_action: 'detect',
         severity: 'medium',
-        summary: `fail_safe: ${handlerName} handler threw ${className} — caught by safeHandler`,
+        reason: `fail_safe: ${handlerName} handler threw ${className} — caught by safeHandler`,
         outcome: 'success',
-        reason: 'handler_exception_caught',
         audit_details: {
           event_type_alias: 'fail_safe',
           handler_name: handlerName,
@@ -1371,18 +1374,16 @@ export class ApplicationCollector {
         layer: 'application',
         source_layer: 'application',
         ts,
-        timestamp: ts,
         pid: process.pid,
         collection_method: 'agent_api',
         session_id: ctx.sessionId,
         run_id: ctx.runId,
-        agent_id: ctx.agentId ?? '__plugin__',
+        agent_id: ctx.agentId ?? null,
         audit_category: 'runtime',
         audit_action: 'detect',
         severity: 'medium',
-        summary: `inline_guard_error: ${label} threw ${className} — chain continued`,
+        reason: `inline_guard_error: ${label} threw ${className} — chain continued`,
         outcome: 'success',
-        reason: 'inline_guard_exception_caught',
         audit_details: {
           event_type_alias: 'inline_guard_error',
           guard_label: label,
@@ -1652,7 +1653,7 @@ export class ApplicationCollector {
    *     routine (most legitimate attacks spell the banned word);
    *     only the rare canonicalization-applied case is worth
    *     surfacing so operators can SEE the obfuscation arms-race
-   *   - `outcome: 'success'` / `reason: 'detect'` — the detector ran
+   *   - `outcome: 'success'` — the detector ran
    *     cleanly; the SPL rule's block decision is on the paired event
    *   - `tool_call_id` joins the audit back to the originating
    *     `agent_tool_call` record
@@ -1693,22 +1694,20 @@ export class ApplicationCollector {
         layer: 'application',
         source_layer: 'application',
         ts: Date.now(),
-        timestamp: Date.now(),
         pid: process.pid,
         collection_method: 'agent_api',
-        session_id: sessionContext?.sessionId ?? '__plugin__',
-        run_id: sessionContext?.runId ?? '__plugin__',
-        agent_id: sessionContext?.agentId ?? '__plugin__',
+        session_id: sessionContext?.sessionId ?? null,
+        run_id: sessionContext?.runId ?? null,
+        agent_id: sessionContext?.agentId ?? null,
         tool_name: exec.name,
         tool_call_id: toolCallId,
         audit_category: 'behavior',
         audit_action: 'detect',
         severity: 'low',
-        summary:
+        reason:
           `canonicalization applied: rule ${ruleId} matched on canonical form ` +
           `(tool=${exec.name}, decision=${decision.decision})`,
         outcome: 'success',
-        reason: 'detect',
         audit_details: {
           event_type_alias: 'canonicalization_applied',
           rule_id: ruleId,

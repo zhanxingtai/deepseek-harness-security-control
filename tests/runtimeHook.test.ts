@@ -239,12 +239,10 @@ describe('RuntimeHook wrap — allow path', () => {
     expect(collector.events[0]?.exe).toBe('bash')
     expect(collector.events[0]?.blocked).toBe(false)
     expect(collector.events[0]?.session_id).toBeUndefined()
-    // 2026-08-19 (Fix 2): canonical argv vector for audit replay of
-    // fragment-variable attacks. argv MUST equal spec.argv verbatim
-    // (spread to detach from readonly). The legacy `arguments` alias
-    // was removed in §十一 B4 — `argv` is the
-    // sole structured vector going forward.
-    expect(collector.events[0]?.argv).toEqual(['bash', '-c', 'echo hi'])
+    // The platform process contract is `anyOf [cmdline, exe]` — the
+    // cmdline string carries the spawn verbatim (the structured argv
+    // vector no longer rides on the wire event).
+    expect(collector.events[0]?.cmdline).toBe('bash -c echo hi')
   })
 
   it('tags unpatched engine launches with risk_flags', async () => {
@@ -318,12 +316,11 @@ describe('RuntimeHook wrap — allow path', () => {
     expect(hook.stats.untracked).toBe(0)
   })
 
-  it('falls back to sessionId / runId when taskId / turnId are absent on sessionResolve', async () => {
-    // Operators that have not yet upgraded ApplicationCollector to stamp
-    // taskId / turnId still get the dedicated fields via a sessionId /
-    // runId fallback so audit consumers never see `undefined` for the
-    // task/turn keys. Mirrors the in-SessionContext derivation
-    // (`sessionContext.sessionId`, `sessionContext.runId`).
+  it('writes null task_id / turn_id when the session carries no real task ids', async () => {
+    // Platform identity rule (common.json): a task_id that duplicates
+    // session_id is drift and must not be written — an undeterminable
+    // identity is explicit JSON null. The pre-2026-10-27 fallback mirrored
+    // sessionId/runId here, creating SOC false correlations.
     const collector = new StubEventCollector()
     const target = makeSubprocessRuntime()
     const session: RuntimeHookSessionContext = {
@@ -345,11 +342,8 @@ describe('RuntimeHook wrap — allow path', () => {
     const event = collector.events[0]
     expect(event?.session_id).toBe('s-2')
     expect(event?.run_id).toBe('r-2')
-    // 4 fallback: explicit task_id mirrors session_id when absent
-    // turn_id mirrors run_id. Audit dashboards can rely on the keys
-    // being present even before ApplicationCollector is upgraded.
-    expect(event?.task_id).toBe('s-2')
-    expect(event?.turn_id).toBe('r-2')
+    expect(event?.task_id).toBe(null)
+    expect(event?.turn_id).toBe(null)
   })
 
   it('counts untracked spawns when sessionResolve returns undefined', async () => {
@@ -489,10 +483,9 @@ describe('RuntimeHook wrap — block path', () => {
     expect(collector.events.length).toBe(1)
     expect(collector.events[0]?.event_type).toBe('runtime_spawn_denied')
     expect(collector.events[0]?.block_reason).toBe('restart no patch')
-    // 2026-08-19 (Fix 2): the event must carry the canonical argv vector
-    // so the audit log captures the blocked restart attempt's exact
+    // The cmdline string captures the blocked restart attempt's exact
     // command — `pnpm dsh web` without the security-monitor patch.
-    expect(collector.events[0]?.argv).toEqual(['/usr/bin/pnpm', 'dsh', 'web'])
+    expect(collector.events[0]?.cmdline).toBe('/usr/bin/pnpm dsh web')
   })
 
   it('enforce+block:false (audit mode) does NOT throw', async () => {
@@ -592,8 +585,8 @@ describe('RuntimeHook wrapTerminal', () => {
     })
     expect(collector.events.length).toBe(1)
     expect(collector.events[0]?.event_type).toBe('runtime_terminal_intent')
-    // 2026-08-19 (Fix 2): terminal intent must also carry canonical argv.
-    expect(collector.events[0]?.argv).toEqual(['/bin/bash'])
+    // Terminal intent carries the canonical cmdline string.
+    expect(collector.events[0]?.cmdline).toBe('/bin/bash')
   })
 
   it('terminal intent carries task_id / turn_id from sessionResolve', async () => {

@@ -105,9 +105,10 @@ describe('Plugin entry point', () => {
 
     expect(events.length).toBeGreaterThan(0)
     expect(events[0].comm).toBe('sst-security-control-dsh')
-    // 2026-08-18: apply() now emits a `plugin_startup` diagnostic as the
-    // first event in headless mode. Filter to the first tool event for
-    // assertions about the tools/pre-execute contract.
+    // 2026-08-18: apply() emits a startup diagnostic (an `agent_start` row
+    // with collector.hook_name === 'plugin_startup') as the first event in
+    // headless mode. Filter to the first tool event for assertions about
+    // the tools/pre-execute contract.
     const toolEvents = events.filter((e) => e.event_type === 'agent_tool_call')
     expect(toolEvents.length).toBeGreaterThan(0)
     // file_read double-fire fix: the `file_read` event_type

@@ -16,8 +16,9 @@
  *     hook/middleware/collector details live on `collector`).
  *   - `applyDecisionToEvent(event, decision?)` — hoist the SPL decision
  *     onto the emitted event (`blocked`, top-level `block_reason`,
- *     `intervention` with marketplace 3-action vocabulary, optional
- *     `risk_assessment`).
+ *     `intervention` with marketplace 3-action vocabulary; the risk
+ *     signal rides INSIDE `intervention.risk_assessment` as the single
+ *     copy — no top-level duplicate).
  *   - `emit(event)` — call `LocalNdjsonSink.report()` and bump the
  *     shared `eventsEmitted` counter.
  *
@@ -67,12 +68,12 @@ export class EventEmitter {
       layer: 'application',
       source_layer: 'application',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'agent_api',
       session_id: sessionContext.sessionId,
       run_id: sessionContext.runId,
       agent_id: sessionContext.agentId,
+      ...(sessionContext.sessionTitle ? { session_title: sessionContext.sessionTitle } : {}),
       ...buildHostMeta(),
       blocked: false,
     }
@@ -121,6 +122,25 @@ export class EventEmitter {
     if (decision.decision === 'block' && decision.block_reason) {
       event.block_reason = decision.block_reason
     }
+    // Top-level `severity` for a blocked event. The platform's
+    // `security_audit` / event contract carries `severity` as a
+    // top-level field, but until now only the SPL engine's own
+    // severity lived on `intervention.severity` — 633 of the 959 rows
+    // in the 2026-10-27 real capture had NO top-level severity, and
+    // the two genuine detections (the blocked `npm uninstall`) were
+    // among them. A dashboard that filters on `severity` therefore saw
+    // the 58 noise rows (which carried a hard-coded 'high') and missed
+    // both real blocks: the severity filter was inverted against the
+    // operator's interest.
+    //
+    // Only BLOCKED events get the field: a severity on an allowed
+    // event would read as a finding that never happened. The SPL
+    // severity vocabulary is 'critical | extreme | high | medium | low'
+    // while the event vocabulary is 'info | low | medium | high |
+    // critical' — 'extreme' maps onto 'critical'.
+    if (decision.decision === 'block' && decision.severity) {
+      event.severity = decision.severity === 'extreme' ? 'critical' : decision.severity
+    }
     // fail_strategy is preserved on the internal SecurityDecision for
     // telemetry, but the platform `intervention` field table does not list it,
     // so it is not propagated to the emitted event payload.
@@ -148,9 +168,11 @@ export class EventEmitter {
           severity_downgraded: decision.severity_downgraded,
           severity_rule_id: decision.severity_rule_id,
         }
-    if (decision.risk_signal) {
-      event.risk_assessment = decision.risk_signal
-    }
+    // risk_signal rides INSIDE `intervention.risk_assessment` only — the
+    // DecisionComposer stamps it there. A top-level copy used to
+    // duplicate the block for every blocked event (three-layer
+    // repetition: top-level + intervention + policy_evaluation);
+    // consumers read `intervention.risk_assessment`.
   }
 
   /**

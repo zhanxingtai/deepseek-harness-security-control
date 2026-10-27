@@ -15,7 +15,8 @@
  *     missing) surfaces; the Subprocess seam failure already writes
  *     `runtime_hook_install_failed` and the network-capture failure
  *     writes `network_capture_install_failed` + `surface_unavailable`.
- * 2. NDJSON plane — the `plugin_startup` diagnostic event
+ * 2. NDJSON plane — the startup diagnostic (an `agent_start` row
+ *     distinguished by `collector.hook_name === 'plugin_startup'`)
  *     carries a `metadata.surfaces` block (`ui` / `cli` / `remote` /
  *     `network` / `subprocess`) so the FIRST startup event in
  *     `security-events.jsonl` shows the whole availability map.
@@ -79,8 +80,10 @@ interface DebugLine {
 
 interface StartupEvent {
   event_type: string
-  session_id?: string
-  agent_id?: string
+  session_id?: string | null
+  run_id?: string | null
+  agent_id?: string | null
+  collector?: { hook_name?: string }
   metadata?: {
     surfaces?: Record<string, { available?: boolean | null; note?: string }>
   }
@@ -151,10 +154,14 @@ describe('BUG-5 surface degradation visibility', () => {
     expect(remote?.reason).toMatch(/deferred: waiting for the typert registry/)
   })
 
-  it('the first plugin_startup event in NDJSON carries the 5-field surfaces block', async () => {
+  it('the first startup event in NDJSON carries the 5-field surfaces block', async () => {
     await bootHeadless()
     const events = readEvents()
-    const startup = events.find((event) => event.event_type === 'plugin_startup')
+    const startup = events.find(
+      (event) =>
+        event.event_type === 'agent_start' &&
+        (event.collector as { hook_name?: string } | undefined)?.hook_name === 'plugin_startup',
+    )
     expect(startup).toBeDefined()
     const surfaces = startup?.metadata?.surfaces
     expect(surfaces).toBeDefined()
@@ -169,16 +176,22 @@ describe('BUG-5 surface degradation visibility', () => {
     expect(surfaces?.['ui']?.available).toBeNull()
   })
 
-  // T4 (2026-10-27): the producer no longer hardcodes
-  // `session_id: 'plugin-startup'` — the platform rule is "never invent a
-  // correlation id". The local NDJSON sink backfills its own '__plugin__'
-  // placeholder at write time (ensureSessionContext), so the observable
-  // change here is that the fabricated startup-scoped value is gone.
-  it('the plugin_startup event carries no fabricated session_id', async () => {
+  // T4 (2026-10-27): the producer writes null identity — the platform
+  // rule is "never invent a correlation id"; an undeterminable identity
+  // is explicit JSON null, never a fabricated sentinel. The startup row
+  // additionally rides the standard agent_start type (plugin_startup is
+  // kept only as collector.hook_name).
+  it('the startup event carries explicit null identity and rides agent_start', async () => {
     await bootHeadless()
     const events = readEvents()
-    const startup = events.find((event) => event.event_type === 'plugin_startup')
+    const startup = events.find(
+      (event) =>
+        event.event_type === 'agent_start' &&
+        (event.collector as { hook_name?: string } | undefined)?.hook_name === 'plugin_startup',
+    )
     expect(startup).toBeDefined()
-    expect(startup?.session_id).not.toBe('plugin-startup')
+    expect(startup?.session_id).toBe(null)
+    expect(startup?.run_id).toBe(null)
+    expect(startup?.agent_id).toBe(null)
   })
 })

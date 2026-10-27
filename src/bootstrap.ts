@@ -31,6 +31,7 @@ import {
 } from './intervention/SelfProtectionGuard.js'
 import { installPluginUnloadSentinel } from './intervention/PluginUnloadSentinel.js'
 import { DebugLog } from './utils/debugLog.js'
+import { AuditDeduper } from './utils/events/auditDedup.js'
 import { generateEventId } from './utils/eventId.js'
 import { installSignalHandlers } from './utils/signalHandlers.js'
 import { registerSecurityCommand } from './commands/security.js'
@@ -169,6 +170,29 @@ export function assembleComponents(
   // session's agent_id. Without the indirection the tamper emit would
   // fire before applicationCollector exists.
   let acHolder: ApplicationCollector | undefined
+  // Sliding-window content dedup for the policy-path audit emitters
+  // (reloaded / tamper / reload-error). fs.watch bursts + the 30 s reload
+  // poll used to write one `policy/modify` row per reload even when the
+  // rule-set fingerprint was unchanged (268/326 security_audit rows in the
+  // 2026-10-27 real-data sample were this heartbeat). Same target + same
+  // content hash inside `collector.auditDedupWindowMs` → one row;
+  // bookkeeping lands in the debug log. A different hash ALWAYS emits.
+  const policyAuditDeduper = new AuditDeduper({
+    windowMs: () => config.collector.auditDedupWindowMs,
+    onFlush: (win, suppressed) => {
+      try {
+        debugLog.write('audit_dedup', {
+          key: win.key,
+          count: win.count,
+          suppressed,
+          firstTs: win.firstTs,
+          lastTs: win.lastTs,
+        })
+      } catch {
+        /* best-effort bookkeeping */
+      }
+    },
+  })
   const interventionEngine = new InterventionEngine(config, {
     builtinRulePaths: [bundledBuiltinRulePath],
     trustedBaselineHash,
@@ -186,6 +210,10 @@ export function assembleComponents(
     logger: ctx.logger,
     onTamper: (info) => {
       try {
+        // Content-hash dedup: an unchanged rejected reload inside the
+        // window is a duplicate, not a new fact. Different hashes always
+        // pass through.
+        if (!policyAuditDeduper.shouldEmit(`policy|${info.policyPath}`, `${info.baselineHash}|${info.currentHash}`)) return
         ctx.logger.error(
           `[SecurityMonitor] security_audit/policy_tamper: policy file changed (${info.policyPath}); ` +
             `baseline=${info.baselineHash.slice(0, 12)}… current=${info.currentHash.slice(0, 12)}… — ` +
@@ -202,23 +230,21 @@ export function assembleComponents(
           layer: 'application',
           source_layer: 'application',
           ts: info.ts,
-          timestamp: info.ts,
           pid: process.pid,
           collection_method: 'agent_api',
-          session_id: session?.sessionId ?? '__plugin__',
-          run_id: session?.runId ?? '__plugin__',
-          agent_id: session?.agentId ?? '__plugin__',
+          session_id: session?.sessionId ?? null,
+          run_id: session?.runId ?? null,
+          agent_id: session?.agentId ?? null,
           audit_category: 'policy',
           audit_action: 'tamper',
           // platform security_audit per-type schema requires `severity` and
-          // `summary`; `reason` must be a value from the platform's accepted
-          // enum (mapped to the audit_action vocabulary: block / approve /
-          // warn / escalate / guide / detect / tamper / allow / deny).
+          // the free-text `reason`; the vocabulary token lives on
+          // `audit_action` (mapped: block / approve / warn / escalate /
+          // guide / detect / tamper / allow / deny).
           severity: 'high',
-          summary: 'policy file hash diverged from baseline; reload rejected',
+          reason: 'policy file hash diverged from baseline; reload rejected',
           target: info.policyPath,
           outcome: 'blocked',
-          reason: 'tamper',
           audit_details: {
             event_type_alias: 'policy_tamper',
             policy_path: info.policyPath,
@@ -239,6 +265,11 @@ export function assembleComponents(
     // fingerprint) and `policy_tamper` (rejected, hash diverged).
     onReloaded: (info) => {
       try {
+        // Content-hash dedup: the rule-set fingerprint is the content hash
+        // — an unchanged reload (fs.watch burst / 30 s poll heartbeat)
+        // inside the window is swallowed. A genuinely changed rule set has
+        // a different combinedHash and always emits immediately.
+        if (!policyAuditDeduper.shouldEmit(`policy|${info.policyPath}`, info.combinedHash)) return
         if (!info.changed) {
           // Idempotent heartbeat — same rule set as previous reload.
           // Still emit at info level so operators can correlate
@@ -263,24 +294,22 @@ export function assembleComponents(
           layer: 'application',
           source_layer: 'application',
           ts: info.ts,
-          timestamp: info.ts,
           pid: process.pid,
           collection_method: 'agent_api',
-          session_id: session?.sessionId ?? '__plugin__',
-          run_id: session?.runId ?? '__plugin__',
-          agent_id: session?.agentId ?? '__plugin__',
+          session_id: session?.sessionId ?? null,
+          run_id: session?.runId ?? null,
+          agent_id: session?.agentId ?? null,
           audit_category: 'policy',
           audit_action: 'modify',
           // Platform severity enum has no 'info'; the unchanged-heartbeat
           // case keeps its 'low' severity here and stays distinguishable
           // via audit_details.changed.
           severity: 'low',
-          summary: info.changed
+          reason: info.changed
             ? `policy reload committed; rule set fingerprint changed (${info.ruleCount} rules)`
             : `policy reload heartbeat; rule set unchanged (${info.ruleCount} rules)`,
           target: info.policyPath,
           outcome: 'success',
-          reason: 'allow',
           audit_details: {
             event_type_alias: 'policy_reloaded',
             policy_path: info.policyPath,
@@ -307,6 +336,10 @@ export function assembleComponents(
     // at all (the engine warning was DSH_DEBUG-gated).
     onReloadError: (info) => {
       try {
+        // Dedup on the error identity: the engine already gates re-fires
+        // by error text, so this mainly collapses watcher bursts carrying
+        // the same failure.
+        if (!policyAuditDeduper.shouldEmit(`policy|${info.policyPath}`, `${info.error}|${info.ruleCount}`)) return
         ctx.logger.error(
           `[SecurityMonitor] security_audit/policy_reload_error: policy reload failed (${info.policyPath}); ` +
             `${info.ruleCount} rules in effect — FAIL-LOUD: fix the policy file to restore full SPL guards`,
@@ -325,21 +358,19 @@ export function assembleComponents(
           layer: 'application',
           source_layer: 'application',
           ts: info.ts,
-          timestamp: info.ts,
           pid: process.pid,
           collection_method: 'agent_api',
-          session_id: session?.sessionId ?? '__plugin__',
-          run_id: session?.runId ?? '__plugin__',
-          agent_id: session?.agentId ?? '__plugin__',
+          session_id: session?.sessionId ?? null,
+          run_id: session?.runId ?? null,
+          agent_id: session?.agentId ?? null,
           audit_category: 'policy',
           audit_action: 'warn',
           severity: info.ruleCount === 0 ? 'high' : 'medium',
-          summary:
+          reason:
             `policy reload failed (${info.firstFailure ? 'first failure' : 'error changed'}); ` +
             `${info.ruleCount} rules in effect — rule set reduced to files that still parse`,
           target: info.policyPath,
           outcome: 'failure',
-          reason: 'warn',
           audit_details: {
             event_type_alias: 'policy_reload_error',
             policy_path: info.policyPath,
@@ -385,6 +416,10 @@ export function assembleComponents(
     eventCollector,
     sessionResolve: () => applicationCollector.resolveMostRecentSessionForRuntime(),
     logger: ctx.logger,
+    // The runtime posture, recorded on every guard denial so an
+    // operator can see that the refusal happened under an audit-mode
+    // runtime (the guard is mode-independent by design).
+    mode: config.intervention?.mode ?? config.mode,
   })
   let selfProtectionGuardInstalled = false
   const tryInstallSelfProtectionGuard = (): boolean => {
@@ -422,18 +457,29 @@ export function assembleComponents(
   // toggle — no tool call, so the
   // InlineSelfProtection guard seam cannot see it; configIntegrity only
   // validates at startup. The sentinel registers a ctx.effect disposer
-  // that emits a policy_tamper-class security_audit when the plugin scope
-  // is disposed while the process keeps running (and a liveness watchdog
-  // for the dispose-without-disposer residual). Graceful process exits
-  // (natural exit / SIGTERM path / host teardown) set the
-  // graceful-shutdown flag first, so normal restarts stay silent. The
-  // emit goes through the sink's synchronous writeLocalDirect path, which
-  // stays functional during scope disposal.
+  // that OBSERVES the plugin scope being disposed (and a liveness
+  // watchdog for the dispose-without-disposer residual), then defers the
+  // verdict: the plugin_tamper-class security_audit is emitted only if
+  // the plugin has NOT been re-installed within the grace window while
+  // the host process kept running. Graceful process exits (natural exit /
+  // SIGTERM path / host teardown) either set the graceful-shutdown flag
+  // first or simply let the host exit before the unref'd verdict timer
+  // fires, so normal restarts stay silent. HMR reloads (the plugin comes
+  // back) are recognised through the process-level instance registry and
+  // suppressed. The emit goes through the sink's synchronous
+  // writeLocalDirect path, which stays functional during scope disposal.
   const unloadSentinel = installPluginUnloadSentinel(ctx, {
     eventCollector,
     sessionResolve: () => applicationCollector.resolveMostRecentSessionForRuntime(),
     logger: ctx.logger,
     pluginName: 'security-monitor',
+    // The sentinel suppresses the tamper row when it recognises an HMR
+    // reload (the plugin came back). That suppression is invisible in
+    // the event stream by design — it must not look like a threat — so
+    // it is recorded in the debug log instead.
+    debug: (phase, payload) => {
+      debugLog.write(phase, payload ?? {})
+    },
   })
   ctx.logger.info('[SecurityMonitor] unload sentinel installed (HMR-disable detection armed)')
   debugLog.write('unload_sentinel_installed', {})
@@ -455,7 +501,7 @@ export function assembleComponents(
   interventionEngine.initialize()
 
   // Probe the CLI / Remote surfaces with
-  // the exact casts the register functions use, so the plugin_startup
+  // the exact casts the register functions use, so the startup
   // `surfaces` metadata reports precisely the availability decision the
   // registrations make. `network` flips to true once the in-process
   // capture install below succeeds; `subprocess` is path-specific and
@@ -484,7 +530,7 @@ export function assembleComponents(
   //
   // This install sits ahead of the RuntimeHook /
   // surface-registration blocks so `surfaceState.network` reaches its
-  // final value BEFORE any plugin_startup emission path can run — every
+  // final value BEFORE any startup emission path can run — every
   // startup event's `surfaces.network` bit is accurate, not a
   // "not-yet-installed" false negative.
   try {
@@ -515,7 +561,7 @@ export function assembleComponents(
   // `@deepseek-ai/dsh-typert-protocol` is missing. Both also write a
   // `surface_unavailable` debug-log breadcrumb (BUG).
   //
-  // BUG: one `surfaces` block on every plugin_startup payload so
+  // BUG: one `surfaces` block on every startup payload so
   // the first NDJSON startup event shows the whole surface map. `ui` is
   // `available: null` — the client bundle runs in the host webview
   // and the plugin process cannot observe it (documented scope
@@ -632,9 +678,8 @@ export function assembleComponents(
   //       setTimeout fired left the seam wrapping `ctx.subprocess.spawn`
   //       across plugin unload (leaked override on the host context).
   //   (2) On a normal boot where the inject path succeeded, the deferred
-  //       fallback fired unconditionally and emitted a SECOND
-  //       `plugin_startup` event (the observed 2-event count, not the
-  //       documented expected 1).
+  //       fallback fired unconditionally and emitted a SECOND startup
+  //       event (the observed 2-event count, not the documented 1).
   //
   // The new shape: a single `tryInstallRuntimeHook(source)` helper called
   // from both paths, with a closure flag `runtimeHookInstalled` that
@@ -643,25 +688,31 @@ export function assembleComponents(
   // hook regardless of which one fired first.
   let runtimeHookInstalled = false
   const emitStartup = (payload: Record<string, unknown>): void => {
-    // This build ships no uploader: the startup record lands in the local
-    // NDJSON file only, so there is no remote type registry to satisfy. If
-    // an uploader is ever wired in, the event type must be a name the
-    // receiving side accepts — project-scoped extension events are named
-    // `x_<project>_<type>`.
+    // The startup record rides the platform-standard agent_start lifecycle
+    // type (pid is the required handle). `collector.hook_name =
+    // 'plugin_startup'` distinguishes "this agent_start is the plugin's own
+    // startup report" from harness agent lifecycles; the surfaces/RuntimeHook
+    // details stay in `metadata`. Identity: no session/agent exists at boot —
+    // per the platform rule the fields are written null, not fabricated
+    // sentinels.
     try {
       eventCollector.report({
         comm: DEFAULT_PLATFORM_ID,
         event_id: generateEventId(),
-        event_type: 'plugin_startup',
+        event_type: 'agent_start',
         layer: 'application',
+        source_layer: 'application',
         ts: Date.now(),
-        timestamp: Date.now(),
         pid: process.pid,
         collection_method: 'agent_api',
-        // No fabricated session_id — the platform rule is "never invent a
-        // correlation id". The local NDJSON sink backfills its own
-        // '__plugin__' placeholder at write time when it needs one.
-        agent_id: '__plugin__',
+        session_id: null,
+        run_id: null,
+        agent_id: null,
+        collector: {
+          hook_name: 'plugin_startup',
+          middleware_name: DEFAULT_PLATFORM_ID,
+          collector_name: 'bootstrap',
+        },
         metadata: payload,
         ...buildHostMeta(),
       })
@@ -771,7 +822,7 @@ export function assembleComponents(
   // `ctx.inject(['subprocess'], cb)` from inside our
   // `apply()` does not fire its callback in the headless harness boot — the
   // inject fiber enters PENDING and the harness-level service registration
-  // notify path does not reach it (observed via plugin_startup diagnostic
+  // notify path does not reach it (observed via the startup diagnostic
   // remaining at 0). Fall back to a deferred lookup: schedule a setTimeout(0)
   // that runs after the current apply() returns and the harness has finished
   // mounting its own services, then re-check `ctx.subprocess`. This is a

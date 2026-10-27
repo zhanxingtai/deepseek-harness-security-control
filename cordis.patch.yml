@@ -50,6 +50,15 @@
           flushIntervalMs: 1000
           validateEvents: true
           maxFileBytes: 52428800   # 50 MiB NDJSON rotation cap
+          # The audit log file's lifecycle belongs to the plugin by
+          # default: a missing / shrunk / swapped log is reported as an
+          # `integrity/detect` gap. Operators whose log rotator cannot be
+          # recognised by the archive-sibling heuristic (copytruncate, a
+          # rotator that moves the file to another directory) can declare
+          # the log externally managed — the sink then re-baselines with a
+          # warning instead of raising the gap. Off by default: with it
+          # on, a hostile deletion of the audit trail is no longer reported.
+          externallyManagedLog: false
           diskWarnWatermarkBytes: 524288000
           diskLowWatermarkBytes: 104857600
           # A follow-up: install / deploy diagnostic log path.

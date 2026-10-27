@@ -41,7 +41,7 @@
  */
 
 import type { Context, ToolExecution, ToolGuard, ToolsRuntimeLike } from '../types/external.js'
-import type { SecurityDecision, SecurityEvent } from '../types/index.js'
+import type { Mode, SecurityDecision, SecurityEvent } from '../types/index.js'
 import { DEFAULT_PLATFORM_ID } from '../types/index.js'
 import { buildHostMeta } from '../collectors/LocalNdjsonSink.js'
 import { generateEventId } from '../utils/eventId.js'
@@ -64,6 +64,14 @@ export interface SelfProtectionGuardDeps {
   logger: { warn: (message: string, ...args: unknown[]) => void }
   /** Clock override for tests. Defaults to `nowMs()`. */
   now?: () => number
+  /**
+   * The runtime posture in force when the guard refuses a call
+   * (`config.intervention.mode`). Recorded on the denial row as
+   * `audit_details.runtime_mode` so an operator can see that the
+   * refusal happened under an audit-mode runtime — the guard is
+   * mode-independent by design.
+   */
+  mode?: Mode
 }
 
 /**
@@ -157,20 +165,20 @@ function emitGuardDenial(
       layer: 'application',
       source_layer: 'application',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'agent_api',
-      session_id: session?.sessionId,
-      run_id: session?.runId,
-      agent_id: session?.agentId,
+      // Identity unknown outside an agent frame — explicit null per the
+      // platform identity rule.
+      session_id: session?.sessionId ?? null,
+      run_id: session?.runId ?? null,
+      agent_id: session?.agentId ?? null,
       tool_name: execution.name,
       audit_category: 'policy',
       audit_action: 'block',
       severity: 'high',
-      summary: `self-protection guard denied tool '${execution.name}' (${decision.block_code ?? 'unknown'})`,
+      reason: `self-protection guard denied tool '${execution.name}' (${decision.block_code ?? 'unknown'})`,
       target: execution.name,
       outcome: 'blocked',
-      reason: 'block',
       blocked: true,
       audit_details: {
         event_type_alias: 'self_protection_guard_denied',
@@ -180,6 +188,14 @@ function emitGuardDenial(
         block_reason: decision.block_reason,
         tool_name: execution.name,
         guard_seam: 'ctx.tools.guard',
+        // This seam denies REGARDLESS of the runtime mode — the
+        // hardcoded self-protection net is not a policy rule. The
+        // marker makes that explicit, so a row saying "audit mode"
+        // elsewhere in the trail is not read as a contradiction with
+        // this refusal. `runtime_mode` records the posture that was in
+        // force when the refusal happened.
+        mode_independent: true,
+        runtime_mode: deps.mode ?? null,
       },
       ...buildHostMeta(),
     }

@@ -445,7 +445,6 @@ export class RuntimeHook {
           //'layer'is the spec's 3-tier coarse enum.
           layer: 'application',
           ts: Date.now(),
-          timestamp: Date.now(),
           pid: process.pid,
           collection_method: 'runtime',
           session_id: 'wrap-marker',
@@ -896,18 +895,16 @@ export class RuntimeHook {
       layer: 'application',
       source_layer: 'runtime',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'runtime',
       session_id: ctx.sessionId,
       run_id: ctx.runId,
-      agent_id: ctx.agentId ?? '__plugin__',
+      agent_id: ctx.agentId ?? null,
       audit_category: 'runtime',
       audit_action: 'detect',
       severity: 'medium',
-      summary: `inline_guard_error: ${label} threw ${className} — chain continued`,
+      reason: `inline_guard_error: ${label} threw ${className} — chain continued`,
       outcome: 'success',
-      reason: 'inline_guard_exception_caught',
       audit_details: {
         event_type_alias: 'inline_guard_error',
         guard_label: label,
@@ -1042,8 +1039,11 @@ export class RuntimeHook {
       // session/run exactly like the intent events do).
       runId: session?.runId,
       agentId: session?.agentId,
-      taskId: session?.taskId ?? session?.sessionId,
-      turnId: session?.turnId ?? session?.runId,
+      // No sessionId/runId mirroring: the platform identity rule forbids
+      // a task_id that duplicates session_id, so unknown task/turn ids
+      // stay undefined and the wire events write null.
+      taskId: session?.taskId,
+      turnId: session?.turnId,
       statusPath,
     })
   }
@@ -1085,7 +1085,6 @@ export class RuntimeHook {
       layer: 'application',
       source_layer: 'runtime',
       ts,
-      timestamp: ts,
       pid: process.pid,
       // intentionally NO `child_pid` here — the real
       // `SubprocessHandle` exposes no pid (subprocess/src/types.ts:169-196),
@@ -1095,19 +1094,16 @@ export class RuntimeHook {
       session_id: session?.sessionId,
       run_id: session?.runId,
       agent_id: session?.agentId,
-      // stamp the explicit task / turn identifiers so
-      // audit dashboards can correlate a fragment-variable attack spawn
-      // back to its originating agent task without re-parsing run_id.
-      task_id: session?.taskId ?? session?.sessionId,
-      turn_id: session?.turnId ?? session?.runId,
+      // Explicit task / turn identifiers — null when unknown. Per the
+      // platform identity rule these never mirror session_id / run_id
+      // (that drift created SOC false correlations); a real taskId is
+      // only present when a producer upstream stamped one.
+      task_id: session?.taskId ?? null,
+      turn_id: session?.turnId ?? null,
       ...buildHostMeta(),
-      // the schema uses `cmdline`/`exe`.
+      // the platform process contract uses `cmdline`/`exe`.
       cmdline: commandLine,
       exe: argv[0] ?? '',
-      // Structured argv vector for audit replay of
-      // fragment-variable attacks. Optional in the spec but retained
-      // for back-compat.
-      argv: [...argv],
       cwd: spec.cwd,
       blocked: isDenied || decision.decision === 'block',
       block_reason: isDenied ? decision.block_reason : undefined,
@@ -1140,7 +1136,7 @@ export class RuntimeHook {
   /**
    * Emit `runtime_resolve_intent` /
    * `runtime_resolve_denied` for the resolveExecutable seam. Shape mirrors
-   * `emitIntentEvent` (cmdline/exe/argv trio + intervention decision block);
+   * `emitIntentEvent` (cmdline/exe pair + intervention decision block);
    * the symlink-audit fields (`requested_command` / `resolved_path` /
    * `realpath` / `symlink_diverged`) ride in `metadata` for post-hoc
    * replay of the argv-layer bypass attempt.
@@ -1169,18 +1165,16 @@ export class RuntimeHook {
       layer: 'application',
       source_layer: 'runtime',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'runtime',
       session_id: session?.sessionId,
       run_id: session?.runId,
       agent_id: session?.agentId,
-      task_id: session?.taskId ?? session?.sessionId,
-      turn_id: session?.turnId ?? session?.runId,
+      task_id: session?.taskId ?? null,
+      turn_id: session?.turnId ?? null,
       ...buildHostMeta(),
       cmdline: commandText,
       exe: target,
-      argv: [target],
       blocked: isDenied || decision.decision === 'block',
       block_reason: isDenied ? decision.block_reason : undefined,
       risk_flags: deriveRiskFlags({ argv: [target] }),
@@ -1240,7 +1234,6 @@ export class RuntimeHook {
       layer: 'application',
       source_layer: 'runtime',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'runtime',
       session_id: session?.sessionId,
@@ -1248,14 +1241,12 @@ export class RuntimeHook {
       agent_id: session?.agentId,
       // see emitIntentEvent — same task/turn stamping
       // for terminal-spawn events.
-      task_id: session?.taskId ?? session?.sessionId,
-      turn_id: session?.turnId ?? session?.runId,
+      task_id: session?.taskId ?? null,
+      turn_id: session?.turnId ?? null,
       ...buildHostMeta(),
-      // the schema uses `cmdline`/`exe`.
+      // the platform process contract uses `cmdline`/`exe`.
       cmdline: commandLine,
       exe: argv[0] ?? '',
-      // Structured argv vector — see emitIntentEvent.
-      argv: [...argv],
       cwd: spec.cwd,
       blocked: decision.decision === 'block',
       risk_flags: deriveRiskFlags({ argv }),
@@ -1299,16 +1290,12 @@ export class RuntimeHook {
       layer: 'application',
       source_layer: 'runtime',
       ts,
-      timestamp: ts,
       pid: process.pid,
       collection_method: 'runtime',
       ...buildHostMeta(),
-      // the schema uses `cmdline`/`exe`.
+      // the platform process contract uses `cmdline`/`exe`.
       cmdline: commandLine,
       exe: argv[0] ?? '',
-      // Structured argv vector. Optional on hook_error
-      // per the platform specification, but retained for consistency.
-      argv: [...argv],
       blocked: false,
       risk_flags: ['self_protection_internal'],
       error_message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),

@@ -165,7 +165,6 @@ describe('canonicalization_applied audit', () => {
     expect(audit!.audit_action).toBe('detect')
     expect(audit!.severity).toBe('low')
     expect(audit!.outcome).toBe('success')
-    expect(audit!.reason).toBe('detect')
     expect(audit!.tool_name).toBe('bash')
     // Synthetic tool_call_id from ApplicationCollector, NOT exec.callId
     expect(audit!.tool_call_id).toMatch(/^session-canon-1:session-canon-1:bash:\d+$/)

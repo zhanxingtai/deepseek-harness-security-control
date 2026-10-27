@@ -37,6 +37,19 @@ export interface SecurityEvent {
    * audit dashboards).
    */
   layer: 'application' | 'system' | 'asset'
+  /**
+   * DSH extension field (allowed by common.json `additionalProperties`) —
+   * NOT part of the platform layer enum. Records the in-plugin collection
+   * sub-layer that produced the event, a dimension the 3-tier `layer`
+   * deliberately does not carry:
+   *   application — Agent / Cordis hooks (tool calls, messages, fs rows)
+   *   network     — in-process HTTP capture (network_http / DNS audits)
+   *   runtime     — pre-spawn / resolve / terminal interception seams
+   *                 and the stdio-mirror wrapper stream
+   * (`system` / `asset` reserved for future collectors; every emitter
+   * today stamps `layer: 'application'` because all collection happens
+   * inside the agent process.)
+   */
   source_layer?: 'application' | 'network' | 'system' | 'asset' | 'runtime'
   ts: number
   /**
@@ -49,26 +62,41 @@ export interface SecurityEvent {
   /** Derived policy evaluation block injected by EventCollector before persistence / upload. */
   policy_evaluation?: PolicyEvaluation
   collection_method?: string
-  timestamp?: number
   pid?: number
-  session_id?: string
-  run_id?: string
-  agent_id?: string
+  /**
+   * Per the platform identity rule (common.json): when the identity
+   * cannot be determined, the field is written as JSON null — never a
+   * fabricated sentinel — so SOC correlation does not link unrelated
+   * events. The sink backfills null for producers that omit the field.
+   */
+  session_id?: string | null
+  run_id?: string | null
+  agent_id?: string | null
   /**
    * explicit task identifier. Surfaced on runtime_* events
    * (and any future event types that benefit from a stable per-task key)
    * so audit consumers can correlate a spawn to the agent task that
-   * triggered it without parsing `run_id` themselves. Today equals
-   * `session_id` (one session == one logical task in the harness runtime).
+   * triggered it without parsing `run_id` themselves. MUST be null when
+   * no real task id exists — per the platform rule, writing the same
+   * string as `session_id` here is identity drift and is forbidden.
    */
-  task_id?: string
+  task_id?: string | null
   /**
-   * monotonic turn identifier within a task. Mirrors the
-   * `run_id` shape (`${session_id}-${turn}`) so consumers that key on
-   * `run_id` keep working; the dedicated field lets dashboards that want
-   * a short turn token (without the session prefix) avoid re-parsing.
+   * monotonic turn identifier within a task. Same rule as `task_id`:
+   * null when unknown — never a mirror of `run_id`.
    */
-  turn_id?: string
+  turn_id?: string | null
+  /**
+   * Human-readable session display name reported by the host harness
+   * (DSH `session/title` event; user rename > LLM-generated > fallback
+   * excerpt of the first user message, last-wins). Optional collector
+   * custom field per the platform rule — platform stores the raw JSON
+   * and extracts it for display. Absent until the host assigns a title;
+   * stamping resumes on the session's next event, so consumers should
+   * take the LATEST non-empty value per `session_id`. Never fabricated —
+   * omitted when no title exists.
+   */
+  session_title?: string
   host_id?: string
   container_id?: string
   tool_call_id?: string
@@ -77,47 +105,34 @@ export interface SecurityEvent {
   path?: string
   /** File operation encoding (file_* events), e.g. the tool name on file_privilege. */
   operation?: string
-  params?: unknown
   /**
    * list of dotted-path keys that were masked by
    * `redactAndCollectKeys` while building this event. Present on
    * `agent_tool_call` and any other event that flowed through the
    * redaction helper; empty array (`[]`) when nothing matched.
-   * Mirrors what the platform expects under the same field name.
+   * Mirrors what the platform expects under the same field name. The
+   * union list covers both the tool-argument side and the user_prompt
+   * side-channel (prompt-side hits are not broken out separately).
    */
   redacted_keys?: string[]
-  /**
-   * subset of `redacted_keys` whose hits came from
-   * the user_prompt side-channel (the user-typed prompt that initiated
-   * the session, surfaced on every `agent_tool_call`). Operators see
-   * `bearer_token` / `query.token` etc. on the union list and can tell
-   * whether the leak originated in the prompt vs. the tool arguments by
-   * diffing against this list. Present on `agent_tool_call`; empty
-   * array (`[]`) when nothing matched.
-   */
-  user_prompt_redacted_keys?: string[]
   /**
    * JSON-string tool arguments. Carries the redacted object form when
    * `collector.redactRawParams: true` (marketplace default); with the
    * flag flipped off, the verbatim JSON lands here for forensic replay.
-   * `params` is the same data as an object for callers that prefer
-   * structural access. This is the canonical tool-args carrier.
+   * This is the canonical tool-args carrier.
    */
   tool_params?: string
   /**
-   * side-channel describing how `tool_params` was
-   * produced. `enabled` mirrors the live `collector.redactRawParams`
-   * flag; `redacted` is true when the value passed through
-   * `redactRawParams`. The sha256 + size of the original raw string are
-   * always recorded so audit consumers can reconstruct whether masking
-   * changed the carrier without having the original on disk.
+   * SHA-256 hex digest of the ORIGINAL tool-arguments JSON string
+   * (before redaction), per the platform agent contract. Lets audit
+   * consumers fingerprint the raw payload without storing it.
    */
-  params_redaction?: {
-    enabled: boolean
-    redacted: boolean
-    raw_size_bytes: number
-    raw_hash_sha256: string
-  }
+  raw_params_hash?: string
+  /**
+   * Byte length of the original tool-arguments JSON string (before
+   * redaction), companion to `raw_params_hash`.
+   */
+  raw_params_length?: number
   params_hash?: string
   /**
    * MD5 hex digest of the meaningful content of this event. Pre-execute
@@ -182,7 +197,6 @@ export interface SecurityEvent {
   token_usage_total?: number
   execution_duration_ms?: number
   duration?: number
-  execution_status?: string
   status?: 'success' | 'failure'
   /** : process_exit coarse status, populated by the system
    *  layer. psutil cannot reap a process we did not terminate, so we
@@ -221,7 +235,10 @@ export interface SecurityEvent {
   blocked?: boolean
   block_reason?: string
   intervention?: Intervention
-  risk_assessment?: RiskAssessment
+  // NOTE: no top-level `risk_assessment`. The single copy lives on
+  // `intervention.risk_assessment` (DecisionComposer stamps it there);
+  // a top-level duplicate used to repeat the block on every blocked
+  // event and was removed in the 2026-10-27 audit-dedup batch.
   /**
    * Sensitive-value obfuscation algorithm version marker. Required
    * by the platform spec whenever obfuscated values (e.g. `obf:v1`) appear in
@@ -241,12 +258,6 @@ export interface SecurityEvent {
   cmdline?: string
   /** Platform v1.0.0: resolved executable path. */
   exe?: string
-  /**
-   * structured argv vector — optional metadata retained for
-   * fragment-variable attack replay. The canonical string form is
-   * `cmdline`; the canonical executable field is `exe`.
-   */
-  argv?: string[]
   shell_involved?: boolean
   shell?: string
   cwd?: string
@@ -342,13 +353,19 @@ export interface SecurityEvent {
    */
   body_redacted_keys?: string[]
   host?: string
-  code?: number
+  /** HTTP response status — integer or null per the platform network contract. */
+  code?: number | null
   // Structured HTTP headers, required by the platform per-type validator
   // (see event-schema/network.json anyOf branch); used for both human
-  // replay and structured access.
+  // replay and structured access. On network_http events the field is
+  // per-direction: the `send` row carries the request headers, the `recv`
+  // row carries the response headers actually observed on the wire.
   headers?: Record<string, string | string[]>
+  /** True when `headers` was dropped-to-fit the maxBodyBytes budget (with `headers_original_length`). */
+  headers_truncated?: boolean
+  /** Byte size of the full headers object before truncation. */
+  headers_original_length?: number
   body?: string
-  response_body?: string
   /** : SSE stream chunk counts when folding is applied. */
   response_body_chunks_total?: number
   response_body_chunks_kept?: number
@@ -433,8 +450,6 @@ export interface SecurityEvent {
   // `path` (ApplicationCollector.onFsObserved / onFsWriteIntent).
   /** Opaque key produced by the fs backend; do not parse. */
   target_key?: string
-  /** Human-readable path from `FsTarget.displayPath`. */
-  target_path?: string
   /** FsVersion token — present only when observation.kind === 'present'. */
   file_version?: string
   /** 'present' = file exists at observation time; 'absent' = missing. */
@@ -479,17 +494,19 @@ export interface SecurityEvent {
   audit_details?: Record<string, unknown>
   target?: string | object
   outcome?: 'success' | 'failure' | 'blocked' | 'ignored'
-  /** Human-readable explanation for audit/integrity/security_audit events. */
+  /**
+   * Free-text human-readable explanation for the audit event. Carries
+   * the one-line description audit consumers display (the platform
+   * security_audit contract field). Every security_audit emitter must
+   * set `audit_category` + `audit_action`; `reason` is the prose.
+   */
   reason?: string
   /**
    * `audit_category` + `audit_action` are the two fields every
-   * security_audit emitter must set. `summary` is the canonical one-line
-   * description and is what audit consumers display.
-   * `severity` uses the 5 tiers below; the 4 tiers the governance platform
-   * accepts are a subset of them.
+   * security_audit emitter must set. `severity` uses the 5 tiers below;
+   * the 4 tiers the governance platform accepts are a subset of them.
    */
   severity?: 'info' | 'low' | 'medium' | 'high' | 'critical'
-  summary?: string
 }
 
 export interface ActionRecord {
@@ -548,6 +565,23 @@ export interface Intervention {
     | 'block'
     | 'approve'
   mode?: Mode
+  /**
+   * True when the verdict stands REGARDLESS of the runtime mode — the
+   * hardcoded safety nets (the self-protection guard at the
+   * `ctx.tools.guard` seam, the inline self-protection / sensitive-path
+   * / prompt-injection / env-passthrough guards) are not policy rules
+   * and cannot be downgraded by an operator flipping
+   * `intervention.mode` to `audit` or by editing the policy YAML.
+   *
+   * WHY the marker exists: without it a consumer reading
+   * `policy_evaluation.mode` (the runtime posture) next to
+   * `intervention.mode` (the posture of THIS verdict) sees a
+   * contradiction — a denial stamped 'enforce' inside an 'audit'
+   * runtime — with no way to tell a deliberate mode-independent refusal
+   * from a mislabelled row. With the marker, "denied in audit mode"
+   * is explicable.
+   */
+  mode_independent?: boolean
   policy_id?: string
   policy_name?: string
   policy_version?: string
@@ -734,6 +768,15 @@ export interface SessionContext {
   agentId?: string
   userId?: string
   userPrompt?: string
+  /**
+   * Latest human-readable session title observed from the host harness
+   * (`session/title` event). Mutated in place by
+   * `ApplicationCollector.recordSessionTitle` as the host renames the
+   * session (fallback → LLM → user rename, last-wins). `makeBaseEvent`
+   * stamps it onto every subsequent event of the session; absent until
+   * the host assigns a title.
+   */
+  sessionTitle?: string
   systemPrompt?: string
   agentPlan?: string[]
   previousActions: ActionRecord[]
@@ -955,30 +998,32 @@ export interface SecurityDecision {
  * Derived from the event's `intervention` field and injected by EventCollector
  * before local persistence and HTTP upload.
  *
- * The platform per-type validator requires every
- * `matches[]` element AND `final_match` to carry `priority`, `risk_level`,
- * `decision`, `policy_version` (string, not number). `final_match` may no
- * longer be `null` — the `no_match` / `not_applicable` branches now point
- * to a synthetic placeholder match so the wire shape stays uniform.
+ * Local-volume form: when nothing matched, the sink persists the COMPRESSED
+ * shape `{ schema_version, mode, policy_decision }` only — `status` /
+ * `matches` / `final_match` are omitted (they are constants in the empty
+ * case: status derives from the event type's policy applicability,
+ * matches is `[]`, final_match is null). An uploader must expand the
+ * compressed shape back to the full platform contract below before batch
+ * upload; the platform's `policy-evaluation-v1.schema.json` declares
+ * `status` / `matches` / `final_match` in `required: [...]` for all
+ * policy_evaluation objects.
  */
 export interface PolicyEvaluation {
   schema_version: number
   mode: Mode
-  status: 'matched' | 'no_match' | 'not_applicable'
+  /** Present on the full (matched / upload-expanded) shape only. */
+  status?: 'matched' | 'no_match' | 'not_applicable'
   policy_decision: 'allow' | 'block'
-  matches: PolicyEvaluationMatch[]
+  /** Empty array in the no_match / not_applicable cases (full shape only). */
+  matches?: PolicyEvaluationMatch[]
   /**
-   * Final matched rule. The field is ALWAYS present in the wire JSON.
-   * The platform's `policy-evaluation-v1.schema.json` declares
-   * `final_match` in `required: [...]` for all policy_evaluation
-   * objects. Schema validation runs first, so omitting the field
-   * produces a 400 "required" error regardless of business rules.
-   * Conditional semantics:
+   * Final matched rule. Full-shape semantics:
    *   - status=matched       → non-null PolicyEvaluationMatch
    *   - status=no_match/     → JSON null literal
    *     not_applicable
+   * Absent entirely on the locally-persisted compressed empty-hit shape.
    */
-  final_match: PolicyEvaluationMatch | null
+  final_match?: PolicyEvaluationMatch | null
 }
 
 /**

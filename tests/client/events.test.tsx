@@ -84,7 +84,7 @@ function buildFixture(): RawEventRow[] {
       event_type: 'security_audit',
       outcome: 'failure',
       raw_json:
-        '{"ts":4,"event_type":"security_audit","layer":"application","audit_action":"tamper","severity":"high","summary":"plugin unloaded at runtime"}',
+        '{"ts":4,"event_type":"security_audit","layer":"application","audit_action":"tamper","severity":"high","reason":"plugin unloaded at runtime"}',
     },
     {
       ts: 1_700_000_004_000,
@@ -92,7 +92,7 @@ function buildFixture(): RawEventRow[] {
       event_type: 'security_audit',
       outcome: 'success',
       raw_json:
-        '{"ts":5,"event_type":"security_audit","layer":"application","audit_action":"detect","audit_category":"behavior","severity":"medium","summary":"per-tool loop detected"}',
+        '{"ts":5,"event_type":"security_audit","layer":"application","audit_action":"detect","audit_category":"behavior","severity":"medium","reason":"per-tool loop detected"}',
     },
     {
       ts: 1_700_000_005_000,

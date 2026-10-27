@@ -48,6 +48,10 @@ export const CollectorConfigSchema: SchemaT<Record<string, unknown>> = Schema.ob
   validateEvents: Schema.boolean().default(true),
   // surfaced from implicit collector state — 50 MiB default.
   maxFileBytes: Schema.number().default(50 * 1024 * 1024),
+  // Operator declaration that the audit log file's lifecycle is owned by
+  // an external tool (a rotator / shipper / volume manager). Default
+  // false — a file-lifecycle anomaly is reported as an integrity gap.
+  externallyManagedLog: Schema.boolean().default(false),
   // Free disk space below which the collector emits a warn. Default 500 MiB.
   diskWarnWatermarkBytes: Schema.number().default(500 * 1024 * 1024),
   // Free disk space below which the collector stops accepting events.
@@ -56,6 +60,11 @@ export const CollectorConfigSchema: SchemaT<Record<string, unknown>> = Schema.ob
   // redact the tool_params JSON-string carrier before
   // persistence — `tool_params` is the sole tool-args carrier.
   redactRawParams: Schema.boolean().default(true),
+  // Sliding-window content dedup for repetitive security_audit rows
+  // (e.g. fs.watch bursts on the policy file). Same target + same content
+  // hash inside the window → merged into one row's bookkeeping instead of
+  // N rows. 0 disables. See src/utils/events/auditDedup.ts.
+  auditDedupWindowMs: Schema.number().default(10_000),
   // Install / deploy diagnostic log path
   // (operator opt-in, default off). See Config['collector'] doc for
   // the full phase list.
@@ -75,11 +84,20 @@ export const NetworkCaptureConfigSchema: SchemaT<Record<string, unknown>> = Sche
   redactBodies: Schema.boolean().default(true),
   captureResponseBody: Schema.boolean().default(true),
   maxBodyBytes: Schema.number().default(1024 * 1024),
+  // NOTE: `.default(64 KiB)` here is the fallback for configs that carry
+  // NEITHER key. Configs that predate the request/response split only
+  // carry `maxBodyBytes`; init.ts pre-seeds `maxRequestBodyBytes` from
+  // that value (inheritLegacyRequestBodyBudget) BEFORE Schema validation
+  // so the legacy request budget is preserved instead of being silently
+  // shrunk to 64 KiB.
+  maxRequestBodyBytes: Schema.number().default(64 * 1024),
   sseSummaryChunks: Schema.number().default(5),
   sseSummaryLastChunks: Schema.number().default(1),
   includeHosts: Schema.array(Schema.string()).default([]),
   excludeHosts: Schema.array(Schema.string()).default([]),
   excludeUrls: Schema.array(Schema.string()).default([]),
+  ignoreUrls: Schema.array(Schema.string()).default(['/v1/chat/completions', '/v1/messages', '/v1/logs', '/v1/traces', '/v1/metrics']),
+  ignoreHosts: Schema.array(Schema.string()).default(['registry.npmjs.org']),
   sensitiveKeyPatterns: Schema.array(Schema.string()).default([]),
   captureDns: Schema.boolean().default(false),
 })

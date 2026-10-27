@@ -107,3 +107,85 @@ if (events.length > 0) {
   console.log('\nMost recent event:')
   console.log(JSON.stringify(events[events.length - 1], null, 2))
 }
+
+// ---------------------------------------------------------------------------
+// Threat triage — the "is this a real finding or noise?" view.
+//
+// The per-type tally above answers "what was recorded"; this section
+// answers "what should the operator look at". It groups the high /
+// critical rows by their finding signature (which rule / which
+// integrity gap / which audit alias) and marks how many of them were
+// actual blocks, so a burst of unattributed observations is visible at
+// a glance instead of hiding behind a row count.
+//
+// It also reports three signals that were historically silent:
+//   - rows with NO top-level `severity` (a severity-filtered dashboard
+//     cannot see them — the finding is real but invisible),
+//   - `audit_category: 'integrity'` gaps (the audit trail's own
+//     lifecycle anomalies),
+//   - mode divergence: a row whose `policy_evaluation.mode` (the
+//     runtime posture) differs from its `intervention.mode` (the
+//     posture of that verdict). Expected only for the mode-independent
+//     safety nets, which carry `intervention.mode_independent: true`.
+// ---------------------------------------------------------------------------
+function findingSignature(event) {
+  const intervention = event.intervention ?? {}
+  const details = event.audit_details ?? {}
+  if (details.integrity) return `integrity:${details.integrity}`
+  if (details.event_type_alias) return `audit:${details.event_type_alias}`
+  if (intervention.block_code) return `block:${intervention.block_code}`
+  if (event.audit_action) return `audit:${event.audit_action}`
+  return `type:${event.event_type ?? 'unknown'}`
+}
+
+const severityTally = Object.create(null)
+const highBySignature = new Map()
+let rowsWithoutSeverity = 0
+let integrityGaps = 0
+let modeDivergences = 0
+let modeIndependentDenials = 0
+
+for (const event of events) {
+  const severity = event.severity
+  if (severity === undefined || severity === null) rowsWithoutSeverity += 1
+  else severityTally[severity] = (severityTally[severity] ?? 0) + 1
+
+  if (event.audit_category === 'integrity') integrityGaps += 1
+
+  const evaluated = event.policy_evaluation?.mode
+  const verdict = event.intervention?.mode
+  if (typeof evaluated === 'string' && typeof verdict === 'string' && evaluated !== verdict) {
+    if (event.intervention?.mode_independent === true) modeIndependentDenials += 1
+    else modeDivergences += 1
+  }
+
+  if (severity === 'high' || severity === 'critical') {
+    const signature = findingSignature(event)
+    const entry = highBySignature.get(signature) ?? { count: 0, blocked: 0 }
+    entry.count += 1
+    if (event.blocked === true) entry.blocked += 1
+    highBySignature.set(signature, entry)
+  }
+}
+
+console.log('\nThreat triage:')
+const severityOrder = ['critical', 'high', 'medium', 'low', 'info']
+const severityParts = severityOrder
+  .filter((s) => severityTally[s])
+  .map((s) => `${s}=${severityTally[s]}`)
+for (const [s, n] of Object.entries(severityTally)) {
+  if (!severityOrder.includes(s)) severityParts.push(`${s}=${n}`)
+}
+console.log(`  severity: ${severityParts.length > 0 ? severityParts.join('  ') : '(none)'}`)
+console.log(`  rows without a top-level severity: ${rowsWithoutSeverity}`)
+console.log(`  integrity gaps (audit_category=integrity): ${integrityGaps}`)
+console.log(`  mode divergence (runtime posture != verdict posture): ${modeDivergences}`)
+console.log(`  mode-independent denials (expected in audit mode): ${modeIndependentDenials}`)
+if (highBySignature.size === 0) {
+  console.log('  high/critical findings: none')
+} else {
+  console.log('  high/critical findings by signature:')
+  for (const [signature, entry] of [...highBySignature.entries()].sort((a, b) => b[1].count - a[1].count)) {
+    console.log(`    [${entry.count}] ${signature}  (blocked: ${entry.blocked})`)
+  }
+}

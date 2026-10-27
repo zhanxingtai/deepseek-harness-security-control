@@ -255,15 +255,13 @@ describe('ApplicationCollector', () => {
       },
     },
     {
-      // marketplace ships without `redactRawParams` / `raw_params` /
-      // `raw_params_length` / `raw_params_hash` / `raw_params_redacted` —
-      // these existed to support the deleted HTTP ingest contract. The
-      // marketplace keeps `tool_params` (the JSON-string carrier) verbatim
-      // so a future operator who flips to `enforce` still has the original
-      // argv on disk for forensics. Sensitive keys are STILL masked on the
-      // structured `params` object via `redactAndCollectKeys` (invariant
-      //"Sensitive keys are masked on persist").
-      name: 'redacts sensitive tool params (marketplace: BOTH params object and tool_params are masked)',
+      // Marketplace form: `tool_params` (the JSON-string carrier) is the
+      // only wire-level tool-args field. Sensitive keys are masked in it
+      // via `redactRawParams` (invariant "Sensitive keys are masked on
+      // persist"), and the ORIGINAL byte length + sha256 fingerprint of
+      // the pre-redaction JSON survive on `raw_params_hash` /
+      // `raw_params_length` (platform agent contract) for forensic replay.
+      name: 'redacts sensitive tool params (tool_params masked, raw fingerprint kept)',
       toolName: 'exec',
       arguments: {
         command: 'curl -H "Authorization: Bearer abc123" https://api.example.com',
@@ -271,26 +269,21 @@ describe('ApplicationCollector', () => {
       },
       asserts: (events) => {
         const toolCall = events.find((e) => e.event_type === 'agent_tool_call')
-        const params = toolCall!.params as Record<string, unknown>
-        // params object: sensitive KEY-based redaction applies
+        const params = JSON.parse(toolCall!.tool_params ?? '{}') as Record<string, unknown>
+        // tool_params JSON: sensitive KEY-based redaction applies
         // (api_key → ***). KEY-based — a token embedded INSIDE a
         // `command` string survives. Value-pattern scanning is a future
         // extension (audit re-merge boundary).
         expect(params.api_key).toBe('***')
         expect(toolCall!.redacted_keys).toContain('api_key')
-        // fix: the marketplace form unconditionally
+        // The marketplace form unconditionally
         // masks tool_params (post-marketplace audit contract — the
-        // `collector.redactRawParams` opt-out knob was removed). Sensitive
-        // keys (api_key) are masked in the JSON string too; only the
-        // original byte length + sha256 fingerprint survive on
-        // `params_redaction` for forensic replay. The test was previously
-        // asserting tool_params verbatim, which contradicted the
-        // marketplace wire contract.
+        // `collector.redactRawParams` opt-out knob was removed).
         expect(toolCall!.tool_params).not.toContain('super-secret')
         expect(toolCall!.tool_params).toContain('***')
-        expect(toolCall!.params_redaction?.redacted).toBe(true)
-        expect(toolCall!.params_redaction?.raw_size_bytes).toBeGreaterThan(0)
-        expect(toolCall!.params_redaction?.raw_hash_sha256).toMatch(/^[0-9a-f]{64}$/)
+        // Forensic replay fingerprint of the ORIGINAL raw JSON.
+        expect(toolCall!.raw_params_length).toBeGreaterThan(0)
+        expect(toolCall!.raw_params_hash).toMatch(/^[0-9a-f]{64}$/)
         // JSON.stringify escapes inner double-quotes in the string value, so
         // `Authorization: Bearer abc123` shows up with backslash-escaped quotes.
         // This KEY is NOT in the sensitive-key list, so the value stays.
@@ -309,7 +302,7 @@ describe('ApplicationCollector', () => {
         const toolCall = events.find((e) => e.tool_name === 'edit_issue')
         expect(toolCall).toBeDefined()
         expect(toolCall!.event_type).toBe('agent_tool_call')
-        expect(toolCall!.params).toMatchObject({ issue_id: 'DSH-42', body: 'close as fixed' })
+        expect(JSON.parse(toolCall!.tool_params ?? '{}')).toMatchObject({ issue_id: 'DSH-42', body: 'close as fixed' })
         expect(events.some((e) => e.event_type === 'file_write')).toBe(false)
       },
     },
@@ -702,9 +695,9 @@ describe('ApplicationCollector', () => {
   // paste Bearer tokens / API keys / URLs with query secrets into
   // prompts. Pre-fix the prompt landed on disk verbatim; post-fix the
   // same `redactStreamContent` helper the stdio mirror uses
-  // masks the prompt AND surfaces the family on a dedicated
-  // `user_prompt_redacted_keys` side-channel so audit consumers can
-  // distinguish prompt-side hits from tool_params-side hits.
+  // masks the prompt AND surfaces the family on the union
+  // `redacted_keys` list so audit consumers can see prompt-side hits
+  // alongside the tool_params-side hits.
   describe('user_prompt invariant #6 leak fix', () => {
     it('redacts Bearer tokens in user_prompt before emit', async () => {
       const token = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc'
@@ -724,9 +717,9 @@ describe('ApplicationCollector', () => {
       expect(JSON.stringify(toolCall)).not.toContain(token)
       expect(toolCall!.user_prompt).toContain('Bearer ***')
       expect(toolCall!.user_prompt).not.toContain(token)
-      // user_prompt-side hits land on the dedicated side-channel.
-      expect(Array.isArray(toolCall!.user_prompt_redacted_keys)).toBe(true)
-      expect(toolCall!.user_prompt_redacted_keys).toContain('bearer_token')
+      // user_prompt-side hits land on the union `redacted_keys` list.
+      expect(Array.isArray(toolCall!.redacted_keys)).toBe(true)
+      expect(toolCall!.redacted_keys).toContain('bearer_token')
       // The union `redacted_keys` includes the prompt-side hit too.
       expect(toolCall!.redacted_keys).toContain('bearer_token')
     })
@@ -747,7 +740,7 @@ describe('ApplicationCollector', () => {
       expect(JSON.stringify(toolCall)).not.toContain('secret123')
       expect(toolCall!.user_prompt).toContain('token=***')
       expect(toolCall!.user_prompt).toContain('user=alice')
-      expect(toolCall!.user_prompt_redacted_keys).toContain('query.token')
+      expect(toolCall!.redacted_keys).toContain('query.token')
     })
 
     it('leaves benign user_prompt untouched (clean control)', async () => {
@@ -763,7 +756,7 @@ describe('ApplicationCollector', () => {
       })
       const toolCall = events.find((e) => e.event_type === 'agent_tool_call')
       expect(toolCall!.user_prompt).toBe('please list files in /tmp')
-      expect(toolCall!.user_prompt_redacted_keys).toEqual([])
+      expect(toolCall!.redacted_keys).toEqual([])
     })
   })
 })
@@ -953,10 +946,9 @@ describe('ApplicationCollector PID session cache', () => {
         expect(audit!.severity).toBe('medium')
         expect(audit!.tool_name).toBe('bash')
         expect(audit!.session_id).toBe('session-1')
-        expect(audit!.reason).toBe('detect')
-        expect(audit!.summary).toContain('per-tool loop detected')
-        expect(audit!.summary).toContain('bash')
-        expect(audit!.summary).toContain('6/5')
+        expect(audit!.reason).toContain('per-tool loop detected')
+        expect(audit!.reason).toContain('bash')
+        expect(audit!.reason).toContain('6/5')
         const details = audit!.audit_details as Record<string, unknown>
         expect(details.event_type_alias).toBe('looped_tool')
         expect(details.tool_name).toBe('bash')
@@ -1132,12 +1124,11 @@ describe('ApplicationCollector PID session cache', () => {
         expect(audit!.audit_category).toBe('behavior')
         expect(audit!.audit_action).toBe('detect')
         expect(audit!.severity).toBe('medium')
-        expect(audit!.reason).toBe('detect')
         expect(audit!.session_id).toBe('session-1')
         expect(audit!.token_usage_total).toBe(1000)
         expect(audit!.token_usage_prompt).toBe(500)
         expect(audit!.token_usage_completion).toBe(500)
-        expect(audit!.summary).toContain('anomalous token usage')
+        expect(audit!.reason).toContain('anomalous token usage')
         const details = audit!.audit_details as Record<string, unknown>
         expect(details.event_type_alias).toBe('anomalous_token_usage')
         expect(details.session_id).toBe('session-1')
@@ -1226,14 +1217,13 @@ describe('ApplicationCollector.emitFailSafeAudit (A-L1 — 2026-09-25)', () => {
       expect(audit!.audit_action).toBe('detect')
       expect(audit!.severity).toBe('medium')
       expect(audit!.outcome).toBe('success')
-      expect(audit!.reason).toBe('handler_exception_caught')
       // Session identity is best-effort; no session context exists at
       // emit time (handler may have crashed before session-start), so
       // the audit falls back to the plugin-level identity.
-      expect(audit!.session_id).toBe('__plugin__')
-      expect(audit!.agent_id).toBe('__plugin__')
-      expect(audit!.summary).toContain('agent/pre-step')
-      expect(audit!.summary).toContain('CustomBoom')
+      expect(audit!.session_id).toBe(null)
+      expect(audit!.agent_id).toBe(null)
+      expect(audit!.reason).toContain('agent/pre-step')
+      expect(audit!.reason).toContain('CustomBoom')
 
       const details = audit!.audit_details as Record<string, unknown>
       expect(details.event_type_alias).toBe('fail_safe')

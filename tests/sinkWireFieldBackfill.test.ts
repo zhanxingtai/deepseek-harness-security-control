@@ -38,7 +38,6 @@ function makeEvent(overrides: Partial<SecurityEvent> = {}): SecurityEvent {
     event_type: 'agent_message',
     layer: 'application',
     ts: 1700000000000,
-    timestamp: 1700000000000,
     pid: 1,
     host_id: 'host',
     container_id: 'host',

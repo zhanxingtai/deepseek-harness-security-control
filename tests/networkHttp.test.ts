@@ -26,11 +26,17 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       redactBodies: true,
       captureResponseBody: true,
       maxBodyBytes: 1024 * 1024,
+      maxRequestBodyBytes: 1024 * 1024,
       sseSummaryChunks: 5,
       sseSummaryLastChunks: 1,
       includeHosts: [],
       excludeHosts: [],
       excludeUrls: [],
+      // Mirror the shipped defaults so legacy assertions run against the
+      // production-shaped tables; the suppression describe overrides these
+      // per-case (normalizeConfig re-fills omitted keys from defaults).
+      ignoreUrls: ['/v1/chat/completions', '/v1/messages', '/v1/logs', '/v1/traces', '/v1/metrics'],
+      ignoreHosts: ['registry.npmjs.org'],
       sensitiveKeyPatterns: [],
     },
     ...overrides,
@@ -103,14 +109,14 @@ describe('NetworkHttpCollector', () => {
   })
 
   it('emits a network_http event for http.request with body and response', async () => {
-    const { server, url } = await startTestServer({ body: 'hello world' })
+    const { server, url } = await startTestServer({ body: 'hello world', headers: { 'Content-Type': 'text/plain', 'X-Response-Marker': 'resp-marker' } })
     httpCapture = new NetworkHttpCollector(makeConfig(), { eventCollector: collector })
     httpCapture.install()
 
     const promise = waitForEvents(collector, 1)
     const req = http.request(
       `${url}/api/v1/chat`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Request-Marker': 'req-marker' } },
       () => {},
     )
     req.write(JSON.stringify({ model: 'test-model' }))
@@ -125,14 +131,31 @@ describe('NetworkHttpCollector', () => {
     expect(event?.host).toBe('127.0.0.1')
     expect(event?.service).toBe('http')
     expect(event?.direction).toBe('send')
-    expect(event?.code).toBe(200)
-    expect(event?.response_body).toBe('hello world')
+    // The send event captures the request only. Response-side fields
+    // (code / latency_ms / response-chunk metadata) live exclusively on
+    // the recv event — at send time there is no response. content_length /
+    // content_truncated on send describe the REQUEST body.
+    expect(event?.code).toBeUndefined()
+    expect(event?.latency_ms).toBeUndefined()
+    expect(event?.response_body_chunks_total).toBeUndefined()
+    expect(event?.content_truncated).toBeUndefined()
     expect(event?.body).toContain('test-model')
-    expect(typeof event?.latency_ms).toBe('number')
+    // Per-direction headers: send carries the request headers.
+    expect((event?.headers as Record<string, string>)['X-Request-Marker']).toBe('req-marker')
+    expect((event?.headers as Record<string, string>)['X-Response-Marker']).toBeUndefined()
+    const recv = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')
+    expect(recv?.body).toBe('hello world')
+    expect(recv?.code).toBe(200)
+    expect(typeof recv?.latency_ms).toBe('number')
+    // recv carries the response headers actually observed on the wire
+    // (lower-cased by the HTTP parser) — never a copy of the request
+    // headers.
+    expect((recv?.headers as Record<string, string>)['x-response-marker']).toBe('resp-marker')
+    expect((recv?.headers as Record<string, string>)['X-Request-Marker']).toBeUndefined()
   })
 
   it('emits structured `headers` on network_http', async () => {
-    const { server, url } = await startTestServer()
+    const { server, url } = await startTestServer({ headers: { 'Content-Type': 'application/json', 'X-Resp-Server': 'dsh-test-server' } })
     httpCapture = new NetworkHttpCollector(makeConfig(), { eventCollector: collector })
     httpCapture.install()
 
@@ -162,6 +185,55 @@ describe('NetworkHttpCollector', () => {
     expect(typeof event.headers).toBe('object')
     expect((event.headers as Record<string, string>)['Content-Type']).toBe('application/json')
     expect((event.headers as Record<string, string>)['X-Trace-Id']).toBe('trace-abc-123')
+    // Per-direction: the send row never carries response-only headers.
+    expect((event.headers as Record<string, string>)['X-Resp-Server']).toBeUndefined()
+    const recv = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')!
+    expect((recv.headers as Record<string, string>)['x-resp-server']).toBe('dsh-test-server')
+    expect((recv.headers as Record<string, string>)['X-Trace-Id']).toBeUndefined()
+  })
+
+  it('bounds oversized per-direction headers with the same budget rule as bodies', async () => {
+    // maxBodyBytes doubles as the headers budget: the JSON-serialised
+    // headers object over budget gets trailing entries dropped, with the
+    // headers_truncated / headers_original_length marker pair mirroring the
+    // body-side content_truncated / content_original_length convention.
+    const bigHeaders: Record<string, string> = {}
+    for (let i = 0; i < 8; i++) bigHeaders[`X-Bulk-${i}`] = 'v'.repeat(60)
+    const { server, url } = await startTestServer({ headers: bigHeaders })
+    httpCapture = new NetworkHttpCollector(
+      makeConfig({
+        networkCapture: {
+          enabled: true,
+          redactBodies: true,
+          captureResponseBody: true,
+          maxBodyBytes: 200,
+          maxRequestBodyBytes: 1024 * 1024,
+          sseSummaryChunks: 5,
+          sseSummaryLastChunks: 1,
+          includeHosts: [],
+          excludeHosts: [],
+          excludeUrls: [],
+          sensitiveKeyPatterns: [],
+        },
+      }),
+      { eventCollector: collector },
+    )
+    httpCapture.install()
+
+    const promise = waitForEvents(collector, 1)
+    await new Promise<void>((resolve, reject) => {
+      http.get(`${url}/big-headers`, (res) => {
+        res.on('data', () => {})
+        res.on('end', resolve)
+      }).on('error', reject)
+    })
+
+    const events = await promise
+    server.close()
+    const recv = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')!
+    expect(recv.headers_truncated).toBe(true)
+    expect(recv.headers_original_length).toBeGreaterThan(200)
+    expect(Buffer.byteLength(JSON.stringify(recv.headers), 'utf8')).toBeLessThanOrEqual(200)
   })
 
   it('redacts JSON body sensitive keys (Authorization header is now blocked by the inline guard)', async () => {
@@ -211,6 +283,7 @@ describe('NetworkHttpCollector', () => {
         redactBodies: true,
         captureResponseBody: true,
         maxBodyBytes: 1024 * 1024,
+        maxRequestBodyBytes: 1024 * 1024,
         sseSummaryChunks: 5,
         sseSummaryLastChunks: 1,
         includeHosts: [],
@@ -256,8 +329,16 @@ describe('NetworkHttpCollector', () => {
     expect(event).toBeDefined()
     expect(event?.method).toBe('POST')
     expect(event?.url).toBe('/fetch')
-    expect(event?.response_body).toBe('fetch-response')
+    // Response content lives on the recv event's `body` (platform contract).
     expect(event?.body).toContain('"query":"x"')
+    const recv = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')
+    expect(recv?.body).toBe('fetch-response')
+    expect(recv?.code).toBe(200)
+    // fetch seam: recv carries the real response headers too.
+    expect((recv?.headers as Record<string, string>)['content-type']).toBe('application/json')
+    // send carries no response-side fields.
+    expect(event?.code).toBeUndefined()
+    expect(event?.latency_ms).toBeUndefined()
   })
 
   // ---------------------------------------------------------------------------
@@ -562,6 +643,7 @@ describe('NetworkHttpCollector', () => {
           redactBodies: true,
           captureResponseBody: true,
           maxBodyBytes: 100,
+          maxRequestBodyBytes: 1024 * 1024,
           sseSummaryChunks: 5,
           sseSummaryLastChunks: 1,
           includeHosts: [],
@@ -584,10 +666,155 @@ describe('NetworkHttpCollector', () => {
 
     const events = await promise
     server.close()
-    const event = events.find((e) => e.event_type === 'network_http')!
+    const event = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')!
     expect(event.content_truncated).toBe(true)
     expect(event.content_original_length).toBeGreaterThan(100)
-    expect(Buffer.byteLength(event.response_body ?? '', 'utf8')).toBeLessThanOrEqual(100 + 20) // marker budget
+    expect(Buffer.byteLength(event.body ?? '', 'utf8')).toBeLessThanOrEqual(100 + 20) // marker budget
+  })
+
+  it('truncates oversized REQUEST bodies on the send row with the marker pair', async () => {
+    // maxRequestBodyBytes (64 KiB default) is the PERSISTENCE cap for the
+    // request body; the captured-original size rides on
+    // content_original_length so audit consumers can reconstruct it.
+    const bigRequest = 'q'.repeat(2000)
+    const { server, url } = await startTestServer()
+    httpCapture = new NetworkHttpCollector(
+      makeConfig({
+        networkCapture: {
+          enabled: true,
+          redactBodies: true,
+          captureResponseBody: true,
+          maxBodyBytes: 1024 * 1024,
+          maxRequestBodyBytes: 200,
+          sseSummaryChunks: 5,
+          sseSummaryLastChunks: 1,
+          includeHosts: [],
+          excludeHosts: [],
+          excludeUrls: [],
+          sensitiveKeyPatterns: [],
+        },
+      }),
+      { eventCollector: collector },
+    )
+    httpCapture.install()
+
+    const promise = waitForEvents(collector, 1)
+    const req = http.request(`${url}/big-request`, { method: 'POST' }, () => {})
+    req.write(bigRequest)
+    req.end()
+
+    const events = await promise
+    server.close()
+    const send = events.find((e) => e.event_type === 'network_http' && e.direction === 'send')!
+    expect(send.content_truncated).toBe(true)
+    expect(send.content_original_length).toBe(2000)
+    expect(Buffer.byteLength(send.body ?? '', 'utf8')).toBeLessThanOrEqual(200 + 20) // marker budget
+  })
+
+  it('evaluates SPL rules on the FULL request body, before the 64 KiB persistence truncation', async () => {
+    // Order-lock for the evaluate-before-truncate invariant: the sensitive
+    // marker sits AFTER the 64 KiB persistence cutoff — if evaluation ever
+    // ran on the truncated text, the engine would never see it.
+    // Plain-text marker (NOT a credential-family pattern — redactHttpBody
+    // would mask it pre-evaluation; the point here is the ORDER, not the
+    // redaction), placed AFTER the 64 KiB persistence cutoff.
+    const marker = 'DSH_EVAL_ORDER_MARKER_9f3b7c'
+    const filler = 'f'.repeat(70 * 1024)
+    const body = JSON.stringify({ prompt: filler + ' ' + marker })
+    let evaluatedBody: string | undefined
+    const { server, url } = await startTestServer()
+    httpCapture = new NetworkHttpCollector(
+      makeConfig({
+        networkCapture: {
+          enabled: true,
+          redactBodies: true,
+          captureResponseBody: true,
+          maxBodyBytes: 1024 * 1024, // eval budget — the engine sees up to 1 MiB
+          maxRequestBodyBytes: 64 * 1024, // persistence budget — send row caps here
+          sseSummaryChunks: 5,
+          sseSummaryLastChunks: 1,
+          includeHosts: [],
+          excludeHosts: [],
+          excludeUrls: [],
+          sensitiveKeyPatterns: [],
+        },
+      }),
+      {
+        eventCollector: collector,
+        // Minimal evaluateHttp stand-in: records the body the engine saw and
+        // returns allow. The real engine's TTL cache / deadline behaviour is
+        // covered elsewhere; this test only pins the input contract.
+        interventionEngine: {
+          evaluateHttp: async (ctx: { body?: string }) => {
+            evaluatedBody = ctx.body
+            return undefined
+          },
+        } as unknown as Parameters<typeof NetworkHttpCollector>[1]['interventionEngine'],
+        sessionResolve: () => ({ sessionId: 's-1', runId: 'r-1', agentId: 'a-1', toolCallId: 'call-1' }),
+      },
+    )
+    httpCapture.install()
+
+    const promise = waitForEvents(collector, 1)
+    const req = http.request(`${url}/eval-order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, () => {})
+    req.write(body)
+    req.end()
+
+    const events = await promise
+    server.close()
+    // The persisted send row IS truncated to the 64 KiB request budget…
+    const send = events.find((e) => e.event_type === 'network_http' && e.direction === 'send')!
+    expect(send.content_truncated).toBe(true)
+    expect(Buffer.byteLength(send.body ?? '', 'utf8')).toBeLessThanOrEqual(64 * 1024 + 20)
+    // …but the engine evaluated the FULL text — the beyond-cutoff marker
+    // must be visible in the rule input.
+    expect(evaluatedBody).toBeDefined()
+    expect(evaluatedBody!).toContain(marker)
+  })
+
+  it('honours captureResponseBody:false on the http.request seam (symmetric with fetch)', async () => {
+    // Pre-fix the http.request seam accumulated + persisted the response
+    // regardless of the switch; only the fetch seam checked it.
+    const { server, url } = await startTestServer({ body: 'secret-response-body' })
+    httpCapture = new NetworkHttpCollector(
+      makeConfig({
+        networkCapture: {
+          enabled: true,
+          redactBodies: true,
+          captureResponseBody: false,
+          maxBodyBytes: 1024 * 1024,
+          maxRequestBodyBytes: 1024 * 1024,
+          sseSummaryChunks: 5,
+          sseSummaryLastChunks: 1,
+          includeHosts: [],
+          excludeHosts: [],
+          excludeUrls: [],
+          sensitiveKeyPatterns: [],
+        },
+      }),
+      { eventCollector: collector },
+    )
+    httpCapture.install()
+
+    const promise = waitForEvents(collector, 1)
+    await new Promise<void>((resolve, reject) => {
+      http.get(`${url}/no-capture`, (res) => {
+        res.on('data', () => {})
+        res.on('end', resolve)
+      }).on('error', reject)
+    })
+
+    const events = await promise
+    server.close()
+    const recv = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')!
+    // Response metadata (code / headers) is still captured — only the body
+    // is skipped.
+    expect(recv.code).toBe(200)
+    expect(recv.headers).toBeDefined()
+    expect(recv.body ?? '').toBe('')
   })
 
   it('folds SSE streams to head + summary + tail chunks', async () => {
@@ -613,6 +840,7 @@ describe('NetworkHttpCollector', () => {
           redactBodies: true,
           captureResponseBody: true,
           maxBodyBytes: 1024 * 1024,
+          maxRequestBodyBytes: 1024 * 1024,
           sseSummaryChunks: 3,
           sseSummaryLastChunks: 1,
           includeHosts: [],
@@ -635,16 +863,16 @@ describe('NetworkHttpCollector', () => {
 
     const events = await promise
     server.close()
-    const event = events.find((e) => e.event_type === 'network_http')!
-    expect(event.response_body).toContain('data: {"chunk":1}')
-    expect(event.response_body).toContain('data: {"chunk":3}')
-    expect(event.response_body).toContain('data: {"chunk":9}')
-    expect(event.response_body).not.toContain('data: {"chunk":5}')
-    expect(event.response_body).toContain('__dsh_sse_summary')
+    const event = events.find((e) => e.event_type === 'network_http' && e.direction === 'recv')!
+    expect(event.body).toContain('data: {"chunk":1}')
+    expect(event.body).toContain('data: {"chunk":3}')
+    expect(event.body).toContain('data: {"chunk":9}')
+    expect(event.body).not.toContain('data: {"chunk":5}')
+    expect(event.body).toContain('__dsh_sse_summary')
     expect(event.response_body_chunks_total).toBe(9)
     expect(event.response_body_chunks_kept).toBe(5) // 3 head + summary + 1 tail
     expect(event.content_truncated).toBe(true)
-    expect(event.content_original_length).toBeGreaterThan(Buffer.byteLength(event.response_body ?? '', 'utf8'))
+    expect(event.content_original_length).toBeGreaterThan(Buffer.byteLength(event.body ?? '', 'utf8'))
   })
 
   it('restores original http.request after uninstall', async () => {
@@ -663,6 +891,7 @@ describe('NetworkHttpCollector', () => {
         redactBodies: true,
         captureResponseBody: true,
         maxBodyBytes: 1024 * 1024,
+        maxRequestBodyBytes: 1024 * 1024,
         sseSummaryChunks: 5,
         sseSummaryLastChunks: 1,
         includeHosts: [],
@@ -718,6 +947,7 @@ describe('NetworkHttpCollector', () => {
           redactBodies: true,
           captureResponseBody: true,
           maxBodyBytes: 1024 * 1024,
+          maxRequestBodyBytes: 1024 * 1024,
           sseSummaryChunks: 5,
           sseSummaryLastChunks: 1,
           includeHosts: [],
@@ -1039,6 +1269,7 @@ describe('NetworkHttpCollector', () => {
         networkCapture: {
           ...makeConfig().networkCapture,
           maxBodyBytes: 256,
+          maxRequestBodyBytes: 1024 * 1024,
         },
       })
       httpCapture = new NetworkHttpCollector(tinyConfig, { eventCollector: collector })
@@ -1056,5 +1287,158 @@ describe('NetworkHttpCollector', () => {
       const bodyLength = Buffer.byteLength(event.body as string, 'utf8')
       expect(bodyLength).toBeLessThanOrEqual(256 + '…[truncated]'.length + 8)
     })
+  })
+})
+
+describe('NetworkHttpCollector noise suppression (ignoreUrls / ignoreHosts)', () => {
+  let tmpDir: string
+  let collector: LocalNdjsonSink
+  let captured: SecurityEvent[]
+  let originalReport: (e: SecurityEvent) => void
+  let currentCapture: NetworkHttpCollector | undefined
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dsh-network-ignore-'))
+    collector = new LocalNdjsonSink(
+      makeConfig({
+        collector: { localOutputPath: join(tmpDir, 'events.jsonl') },
+      }),
+      { logger: makeLogger() },
+    )
+    collector.initialize()
+    captured = []
+    originalReport = (collector as unknown as { report: (e: SecurityEvent) => void }).report.bind(collector)
+    ;(collector as unknown as { report: (e: SecurityEvent) => void }).report = (event: SecurityEvent) => {
+      captured.push(event)
+      originalReport(event)
+    }
+  })
+
+  afterEach(() => {
+    currentCapture?.uninstall()
+    currentCapture = undefined
+    collector.shutdown()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function installWithNetworkCapture(networkCapture: Record<string, unknown>): NetworkHttpCollector {
+    const config = makeConfig({ networkCapture: { enabled: true, ...networkCapture } as never })
+    const capture = new NetworkHttpCollector(config, { eventCollector: collector })
+    capture.install()
+    currentCapture = capture
+    return capture
+  }
+
+  async function get(url: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const req = http.get(url, (res) => {
+        res.on('data', () => {})
+        res.on('end', () => resolve(res.statusCode ?? 0))
+      })
+      req.on('error', reject)
+    })
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  const networkRows = () => captured.filter((e) => e.event_type === 'network_http')
+
+  it('suppresses default LLM/telemetry path prefixes and counts the drops', async () => {
+    const { server, url } = await startTestServer()
+    // No networkCapture override → makeConfig carries the shipped defaults.
+    const capture = installWithNetworkCapture({})
+    try {
+      expect(await get(`${url}/v1/chat/completions`)).toBe(200)
+      expect(await get(`${url}/v1/chat/completions/`)).toBe(200)
+      expect(await get(`${url}/v1/chat/completions?stream=true`)).toBe(200)
+      expect(await get(`${url}/v1/logs`)).toBe(200)
+      expect(await get(`${url}/v1/messages`)).toBe(200)
+      await sleep(150)
+      expect(networkRows()).toHaveLength(0)
+      expect(capture.getDropCounts().ignoredUrl).toBe(5)
+
+      // Non-matching path still emits (both send + recv).
+      await get(`${url}/api/data`)
+      await sleep(150)
+      expect(networkRows().length).toBeGreaterThanOrEqual(2)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('suppresses by ignoreHosts (exact host match) and reports the host counter', async () => {
+    const { server, url } = await startTestServer()
+    const capture = installWithNetworkCapture({ ignoreHosts: ['127.0.0.1'] })
+    try {
+      expect(await get(`${url}/anything`)).toBe(200)
+      await sleep(150)
+      expect(networkRows()).toHaveLength(0)
+      expect(capture.getDropCounts().ignoredHost).toBe(1)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('livePatch replacing ignoreUrls takes effect on the next request', async () => {
+    const { server, url } = await startTestServer()
+    const capture = installWithNetworkCapture({ ignoreUrls: ['/v1/chat/completions'] })
+    try {
+      const result = capture.livePatch({ networkCapture: { ignoreUrls: ['/probe'] } })
+      expect(result.ok).toBe(true)
+      await get(`${url}/v1/chat/completions`)
+      await get(`${url}/probe`)
+      await sleep(150)
+      // /probe suppressed by the new table; the old prefix no longer matches
+      // so the chat/completions request emits normally (2 events: send+recv).
+      expect(capture.getDropCounts().ignoredUrl).toBe(1)
+      expect(networkRows().length).toBeGreaterThanOrEqual(2)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('keeps the blocking surface: a non-allow decision on an ignored target still emits the event', async () => {
+    const { server, url } = await startTestServer()
+    const engine = {
+      evaluateHttp: async () => ({
+        decision: 'block' as const,
+        mode: 'enforce' as const,
+        block_reason: 'test block on ignored target',
+        intervention: { decision: 'block' as const, mode: 'enforce' },
+      }),
+    }
+    const config = makeConfig({ networkCapture: { enabled: true } as never })
+    const capture = new NetworkHttpCollector(config, {
+      eventCollector: collector,
+      interventionEngine: engine as never,
+    })
+    capture.install()
+    currentCapture = capture
+    try {
+      await get(`${url}/v1/chat/completions`)
+      await sleep(150)
+      const rows = networkRows()
+      expect(rows.length).toBeGreaterThanOrEqual(1)
+      expect(rows.some((r) => r.blocked === true)).toBe(true)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('emits a one-shot config/warn audit when both tables are empty', async () => {
+    const { server, url } = await startTestServer()
+    installWithNetworkCapture({ ignoreUrls: [], ignoreHosts: [] })
+    try {
+      await get(`${url}/v1/chat/completions`)
+      await get(`${url}/v1/chat/completions`)
+      await sleep(150)
+      const warns = captured.filter(
+        (e) => e.event_type === 'security_audit' && e.audit_details?.['event_type_alias'] === 'ignore_tables_empty',
+      )
+      expect(warns).toHaveLength(1)
+      expect(warns[0].audit_category).toBe('config')
+      expect(warns[0].audit_action).toBe('warn')
+    } finally {
+      server.close()
+    }
   })
 })

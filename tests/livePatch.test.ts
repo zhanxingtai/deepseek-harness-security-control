@@ -69,16 +69,15 @@ function makeEvent(overrides: Partial<SecurityEvent> = {}): SecurityEvent {
   return {
     comm: 'sst-security-control-dsh',
     event_id: `evt-test-${Math.random().toString(36).slice(2)}`,
-    event_type: 'plugin_startup',
+    event_type: 'process_snapshot',
     layer: 'application',
     ts: Date.now(),
-    timestamp: Date.now(),
     pid: process.pid,
     collection_method: 'agent_api',
     host_id: 'test-host',
     container_id: 'host',
-    session_id: '__plugin__',
-    agent_id: '__plugin__',
+    session_id: null,
+    agent_id: null,
     ...overrides,
   } as SecurityEvent
 }
@@ -131,7 +130,7 @@ describe('classifyPatchKeys', () => {
       {
         collector: { validateEvents: false, maxFileBytes: 1024, diskLowWatermarkBytes: 4096 },
         application: { captureReasoning: false, toolResultMaxChars: 500, sessionTtlMs: 60_000 },
-        networkCapture: { redactBodies: false, maxBodyBytes: 2048, captureDns: true },
+        networkCapture: { redactBodies: false, maxBodyBytes: 2048, maxRequestBodyBytes: 1024 * 1024, captureDns: true },
         intervention: { decisionTimeoutMs: 10, failStrategy: 'fail_closed' },
         runtimeHooks: { failOpenOnError: false, networkEnabled: false },
         sensitivePathGuard: { paths: ['~/custom-secret'] },
@@ -165,6 +164,7 @@ describe('classifyPatchKeys', () => {
       'loopedToolDetector.windowMs',
       'networkCapture.captureDns',
       'networkCapture.maxBodyBytes',
+      'networkCapture.maxRequestBodyBytes',
       'networkCapture.redactBodies',
       'runtimeHooks.failOpenOnError',
       'runtimeHooks.networkEnabled',
@@ -465,7 +465,7 @@ describe('LivePatchManager.apply', () => {
     expect(audit.audit_action).toBe('deny')
     expect(audit.severity).toBe('high')
     expect(audit.outcome).toBe('blocked')
-    expect(audit.reason).toBe('deny')
+    expect(audit.reason).toContain('被拒绝')
     expect(validateEvent(audit)).toEqual([])
     const details = audit.audit_details as Record<string, unknown>
     expect(details['rejected_keys']).toEqual(['enabled'])
@@ -925,6 +925,7 @@ describe('component livePatch units', () => {
         excludeHosts: ['Evil.EXAMPLE'],
         sensitiveKeyPatterns: ['secret_token'],
         maxBodyBytes: 4096,
+        maxRequestBodyBytes: 1024 * 1024,
         captureDns: true,
         redactBodies: false,
         captureResponseBody: false,
@@ -942,6 +943,7 @@ describe('component livePatch units', () => {
       'networkCapture.excludeUrls',
       'networkCapture.includeHosts',
       'networkCapture.maxBodyBytes',
+      'networkCapture.maxRequestBodyBytes',
       'networkCapture.redactBodies',
       'networkCapture.sensitiveKeyPatterns',
       'networkCapture.sseSummaryChunks',
@@ -958,6 +960,7 @@ describe('component livePatch units', () => {
     expect(probe.sensitiveKeyPatterns).toContain('secret_token')
     expect(probe.excludeUrlRegexps[0]!.test('/health')).toBe(true)
     expect(config.networkCapture.maxBodyBytes).toBe(4096)
+    expect(config.networkCapture.maxRequestBodyBytes).toBe(1024 * 1024)
     // 2026-09-28 config review fix: sensitiveHeaderGuard.keys must be
     // applied by this component (classifier marks it 🟢).
     const shgResult = collector.livePatch({ sensitiveHeaderGuard: { keys: ['X-Custom-Auth'] } })

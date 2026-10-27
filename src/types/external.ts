@@ -206,7 +206,9 @@ export type EventListener<K extends keyof Events> =
                       observation: FsObservation,
                       actor: object | undefined,
                     ) => void
-                  : K extends 'fs/write-intent'
+                  : K extends 'session/event'
+                    ? (session: SessionEventSession, event: SessionEventPayload) => void
+                    : K extends 'fs/write-intent'
                     ? (
                         target: FsTarget,
                         actor: object | undefined,
@@ -230,6 +232,12 @@ export interface Events {
   'tools/post-execute': { exec: ToolExecution; result: ToolExecutionResult }
   'tools/result': ToolResultPayload
   'fs/observed': { target: FsTarget; observation: FsObservation; actor: object | undefined }
+  // DSH session event log (packages/core/session SessionEventMap). The
+  // harness's SessionTitleService appends `session/title` events when a
+  // session title is assigned or renamed (fallback / provider / user).
+  // The plugin consumes `session/title` to stamp `session_title` onto
+  // events; other session event types pass through uninspected.
+  'session/event': { session: SessionEventSession; event: SessionEventPayload }
   'fs/write-intent': {
     target: FsTarget
     actor: object | undefined
@@ -243,11 +251,25 @@ export interface Events {
   'llm/stream': { options: GenerateOptions; next: () => AsyncIterable<StreamChunk> }
 }
 
+/** Minimal view of a DSH session object (packages/core/session). Only
+ *  the header id is needed to correlate a session event with the
+ *  plugin's SessionStore key — `Agent.id === SessionId` on this host. */
+export interface SessionEventSession {
+  header: { id: string }
+}
+
+/** DSH session-event envelope (packages/core/session SessionEventMap).
+ *  The plugin only consumes `type === 'session/title'`, whose `data`
+ *  carries `{ title, source }`; other types are ignored. */
+export interface SessionEventPayload {
+  type: string
+  data?: { title?: unknown; source?: { kind?: string } } & Record<string, unknown>
+}
+
 export interface SessionHeader {
   id: string
   createdAt: number
-  cwd?: string
-}
+  cwd?: string}
 
 export interface Session {
   header: SessionHeader

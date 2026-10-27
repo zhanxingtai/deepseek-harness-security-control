@@ -31,18 +31,17 @@ function makeEvent(overrides: Partial<SecurityEvent> = {}): SecurityEvent {
     layer: 'application',
     source_layer: 'application',
     ts,
-    timestamp: ts,
     pid: process.pid,
     host_id: 'host-test',
     container_id: 'host-test',
     collection_method: 'agent_api',
-    session_id: '__plugin__',
-    run_id: '__plugin__',
-    agent_id: '__plugin__',
+    session_id: null,
+    run_id: null,
+    agent_id: null,
     audit_category: 'runtime',
     audit_action: 'detect',
     severity: 'info',
-    summary: 'enqueueOrPersist test event',
+    reason: 'enqueueOrPersist test event',
     outcome: 'success',
   }
   return { ...base, ...overrides }
@@ -109,7 +108,7 @@ describe('LocalNdjsonSink.enqueueOrPersist (B-M6)', () => {
     sink.initialize()
     // Write a few events until we trigger a cap rotation.
     for (let i = 0; i < 8; i++) {
-      sink.report(makeEvent({ summary: `event-${'x'.repeat(50)}-${String(i)}` }))
+      sink.report(makeEvent({ reason: `event-${'x'.repeat(50)}-${String(i)}` }))
     }
     sink.shutdown()
     // The file may have been rotated at least once. The presence of
@@ -126,7 +125,7 @@ describe('LocalNdjsonSink.enqueueOrPersist (B-M6)', () => {
     sink.initialize()
     expect(() => {
       for (let i = 0; i < 50; i++) {
-        sink.report(makeEvent({ summary: `stress-${'y'.repeat(40)}-${String(i)}` }))
+        sink.report(makeEvent({ reason: `stress-${'y'.repeat(40)}-${String(i)}` }))
       }
     }).not.toThrow()
     sink.shutdown()
@@ -185,13 +184,13 @@ describe('LocalNdjsonSink.enqueueOrPersist — disk-low state machine parity (B-
       // Critical event (block) — survives degraded.
       const critical = makeEvent({
         audit_action: 'tamper',
-        summary: 'critical post-refactor',
+        reason: 'critical post-refactor',
       })
       sink.report(critical)
       // Non-critical event — dropped during degraded mode.
       const ordinary = makeEvent({
         audit_action: 'detect',
-        summary: 'ordinary post-refactor',
+        reason: 'ordinary post-refactor',
       })
       sink.report(ordinary)
       sink.shutdown()
@@ -199,7 +198,7 @@ describe('LocalNdjsonSink.enqueueOrPersist — disk-low state machine parity (B-
       const lines = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean)
       const criticalOnDisk = lines.some((l) => {
         const e = JSON.parse(l) as SecurityEvent
-        return e.audit_action === 'tamper' && e.summary === 'critical post-refactor'
+        return e.audit_action === 'tamper' && e.reason === 'critical post-refactor'
       })
       expect(criticalOnDisk).toBe(true)
     } finally {

@@ -24,7 +24,7 @@
  *
  * The function never throws — it returns a result object. The caller
  * (apply) decides what to do with `ok=false` (typically: refuse to
- * load, surface as a `plugin_startup` event). Drift is deliberately NOT
+ * load, surface as a startup `agent_start` event). Drift is deliberately NOT
  * part of `ok`: flipping `mode` to `enforce` is the documented
  * hardening path and legitimately changes the hash, so drift is
  * surfaced as a warning-level record (`configDrift.issue`) instead of

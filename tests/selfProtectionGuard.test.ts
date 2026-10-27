@@ -95,6 +95,23 @@ describe('createSelfProtectionGuard — deny-list semantics', () => {
     expect(details.guard_seam).toBe('ctx.tools.guard')
   })
 
+  it('marks the denial as mode-independent and records the runtime mode', () => {
+    // The guard refuses REGARDLESS of the runtime mode — it is not a
+    // policy rule. Without the marker, a consumer reading
+    // `policy_evaluation.mode` (the runtime posture) next to this row
+    // cannot tell a deliberate mode-independent refusal from a
+    // mislabelled row: in the 2026-10-27 capture a self-protection
+    // denial sat inside an audit-mode runtime while the trail said
+    // "audit" for the enforcement that had actually happened.
+    const { deps, reported } = makeDeps({ mode: 'audit' })
+    const guard = createSelfProtectionGuard(deps)
+    guard(makeExec({ arguments: { command: 'pnpm remove sst-security-control-dsh' } }))
+    expect(reported).toHaveLength(1)
+    const details = reported[0]!.audit_details as Record<string, unknown>
+    expect(details.mode_independent).toBe(true)
+    expect(details.runtime_mode).toBe('audit')
+  })
+
   it('denies kill with INLINE_SELF_PROTECTION_014', () => {
     // tightened kill deny-list requires a same-line
     // target reference to the engine / plugin process tree. Bare `kill <pid>`
@@ -213,8 +230,11 @@ describe('createSelfProtectionGuard — deny-list semantics', () => {
     const guard = createSelfProtectionGuard(deps)
     guard(makeExec({ arguments: { command: 'kill 1 dsh web' } }))
     expect(reported).toHaveLength(1)
-    // session_id stays undefined — security_audit does not require it.
-    expect(reported[0]!.session_id).toBeUndefined()
+    // Identity is explicit null when no session is active — the platform
+    // rule requires null over a fabricated sentinel (security_audit does
+    // not require the field at all).
+    expect(reported[0]!.session_id).toBe(null)
+    expect(reported[0]!.agent_id).toBe(null)
     expect((reported[0]!.audit_details as Record<string, unknown>).policy_id).toBe(
       'inline-self-protection',
     )

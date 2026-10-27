@@ -148,6 +148,11 @@ export const CONFIG_FIELD_METADATA: ReadonlyArray<ConfigFieldMeta> = [
   { key: 'collector.maxFileBytes', section: 'collector', label: 'config_field_collector_maxFileBytes', kind: 'number', visibility: 'advanced' },
   { key: 'collector.diskWarnWatermarkBytes', section: 'collector', label: 'config_field_collector_diskWarnWatermarkBytes', kind: 'number', visibility: 'advanced' },
   { key: 'collector.diskLowWatermarkBytes', section: 'collector', label: 'config_field_collector_diskLowWatermarkBytes', kind: 'number', visibility: 'advanced' },
+  // advanced: only for operators whose log rotator is not recognisable
+  // by the archive-sibling heuristic (copytruncate, cross-directory
+  // moves). Off by default — on, a hostile deletion is no longer reported.
+  { key: 'collector.externallyManagedLog', section: 'collector', label: 'config_field_collector_externallyManagedLog', kind: 'boolean', visibility: 'advanced', help: 'config_help_collector_externallyManagedLog' },
+  { key: 'collector.auditDedupWindowMs', section: 'collector', label: 'config_field_collector_auditDedupWindowMs', kind: 'number', visibility: 'advanced', help: 'config_help_collector_auditDedupWindowMs' },
   // normalizeConfig force-asserts `true` — the
   // switch cannot be turned off, so it renders locked (read-only truth).
   { key: 'collector.redactRawParams', section: 'collector', label: 'config_field_collector_redactRawParams', kind: 'boolean', visibility: 'advanced', locked: true, help: 'config_help_guard_baseline_locked' },
@@ -167,11 +172,14 @@ export const CONFIG_FIELD_METADATA: ReadonlyArray<ConfigFieldMeta> = [
   { key: 'networkCapture.redactBodies', section: 'networkCapture', label: 'config_field_networkCapture_redactBodies', kind: 'boolean', visibility: 'advanced' },
   { key: 'networkCapture.captureResponseBody', section: 'networkCapture', label: 'config_field_networkCapture_captureResponseBody', kind: 'boolean', visibility: 'advanced' },
   { key: 'networkCapture.maxBodyBytes', section: 'networkCapture', label: 'config_field_networkCapture_maxBodyBytes', kind: 'number', visibility: 'advanced' },
+  { key: 'networkCapture.maxRequestBodyBytes', section: 'networkCapture', label: 'config_field_networkCapture_maxRequestBodyBytes', kind: 'number', visibility: 'advanced', help: 'config_help_networkCapture_maxRequestBodyBytes' },
   { key: 'networkCapture.sseSummaryChunks', section: 'networkCapture', label: 'config_field_networkCapture_sseSummaryChunks', kind: 'number', visibility: 'advanced' },
   { key: 'networkCapture.sseSummaryLastChunks', section: 'networkCapture', label: 'config_field_networkCapture_sseSummaryLastChunks', kind: 'number', visibility: 'advanced' },
   { key: 'networkCapture.includeHosts', section: 'networkCapture', label: 'config_field_networkCapture_includeHosts', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_csv' },
   { key: 'networkCapture.excludeHosts', section: 'networkCapture', label: 'config_field_networkCapture_excludeHosts', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_csv' },
   { key: 'networkCapture.excludeUrls', section: 'networkCapture', label: 'config_field_networkCapture_excludeUrls', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_csv' },
+  { key: 'networkCapture.ignoreUrls', section: 'networkCapture', label: 'config_field_networkCapture_ignoreUrls', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_networkCapture_ignoreUrls' },
+  { key: 'networkCapture.ignoreHosts', section: 'networkCapture', label: 'config_field_networkCapture_ignoreHosts', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_csv' },
   { key: 'networkCapture.sensitiveKeyPatterns', section: 'networkCapture', label: 'config_field_networkCapture_sensitiveKeyPatterns', kind: 'string', csv: true, visibility: 'advanced', help: 'config_help_networkCapture_sensitiveKeyPatterns' },
   { key: 'networkCapture.captureDns', section: 'networkCapture', label: 'config_field_networkCapture_captureDns', kind: 'boolean', visibility: 'advanced' },
   // ----- runtimeHooks -----

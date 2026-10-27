@@ -41,9 +41,15 @@ export const DEFAULTS_COLLECTOR: CollectorConfig = {
   flushIntervalMs: 1000,
   validateEvents: true,
   maxFileBytes: 50 * 1024 * 1024,
+  // The audit log's lifecycle is the PLUGIN's by default: a missing /
+  // shrunk / swapped log is reported as an integrity gap. Operators who
+  // rotate the log with an external tool can declare it (see
+  // CollectorConfig.externallyManagedLog).
+  externallyManagedLog: false,
   diskWarnWatermarkBytes: 500 * 1024 * 1024,
   diskLowWatermarkBytes: 100 * 1024 * 1024,
   redactRawParams: true,
+  auditDedupWindowMs: 10_000,
   debugLogPath: '',
 }
 
@@ -60,12 +66,23 @@ export const DEFAULTS_NETWORK_CAPTURE: NetworkCaptureConfig = {
   enabled: true,
   redactBodies: true,
   captureResponseBody: true,
+  // Response body budget (1 MiB). The request body budget is split out
+  // to maxRequestBodyBytes (64 KiB) — LLM prompts dominated the NDJSON
+  // volume and are rarely worth replaying in full.
   maxBodyBytes: 1024 * 1024,
+  maxRequestBodyBytes: 64 * 1024,
   sseSummaryChunks: 5,
   sseSummaryLastChunks: 1,
   includeHosts: [],
   excludeHosts: [],
   excludeUrls: [],
+  // Noise-suppression defaults (observation events only; blocking and
+  // the sensitive-header guard are unaffected). Path prefixes cover the
+  // OpenAI-compatible LLM main link, Anthropic messages, and OTLP
+  // telemetry — vendor-neutral by path. Operators widen/narrow via
+  // `networkCapture.ignoreUrls` / `ignoreHosts` (livePatch-able).
+  ignoreUrls: ['/v1/chat/completions', '/v1/messages', '/v1/logs', '/v1/traces', '/v1/metrics'],
+  ignoreHosts: ['registry.npmjs.org'],
   sensitiveKeyPatterns: [],
   captureDns: false,
 }

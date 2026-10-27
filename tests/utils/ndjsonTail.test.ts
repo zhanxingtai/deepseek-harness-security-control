@@ -339,7 +339,7 @@ describe('isBlockDecision', () => {
     // 无 intervention 的 security_audit(如 SelfProtectionGuard 审计行,
     // 顶层 blocked:true 但没有 intervention 块)——不计入。
     expect(isBlockDecision({ event_type: 'security_audit', blocked: true, audit_action: 'block', severity: 'high' })).toBe(false)
-    expect(isBlockDecision({ event_type: 'plugin_startup' })).toBe(false)
+    expect(isBlockDecision({ event_type: 'agent_start' })).toBe(false)
   })
 
   it('rejects events without an intervention', () => {

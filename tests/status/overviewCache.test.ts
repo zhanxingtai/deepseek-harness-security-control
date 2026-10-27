@@ -57,6 +57,7 @@ function makeConfig(): Config {
       redactBodies: true,
       captureResponseBody: false,
       maxBodyBytes: 1_048_576,
+      maxRequestBodyBytes: 1024 * 1024,
       sseSummaryChunks: 5,
       sseSummaryLastChunks: 1,
       includeHosts: [],

@@ -157,6 +157,9 @@ export const REGISTERED_EVENTS: readonly string[] = [
   // Token-usage burst detector taps the llm/stream waterfall (tee — never
   // blocks generation).
   'llm/stream',
+  // Session display names (session_title) — the host appends session/title
+  // events; listener never blocks.
+  'session/event',
 ]
 
 /**
