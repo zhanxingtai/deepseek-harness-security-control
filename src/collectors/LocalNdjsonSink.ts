@@ -16,7 +16,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import fs from 'node:fs'
 import { basename as pathBasename, dirname, join as joinPath } from 'node:path'
-import { hostname } from 'node:os'
+import { hostname, userInfo } from 'node:os'
 import type { Config } from '../config.js'
 import type { Mode, SecurityEvent, PolicyEvaluationMatch } from '../types/index.js'
 import { inferRiskLevel, DEFAULT_PLATFORM_ID } from '../types/index.js'
@@ -1617,6 +1617,27 @@ export class LocalNdjsonSink {
   }
 }
 
+let cachedOsUsername: string | undefined
+
+/**
+ * Resolve the OS login username of the user executing the event producer:
+ * USER → USERNAME → os.userInfo().username. Resolved once per process —
+ * the value cannot change for the plugin's lifetime. Any lookup failure
+ * (e.g. username unresolvable) degrades to '' rather than throwing, so the
+ * audit write path is never broken by identity resolution.
+ */
+function resolveOsUsername(): string {
+  if (cachedOsUsername !== undefined) return cachedOsUsername
+  let resolved = ''
+  try {
+    resolved = process.env.USER || process.env.USERNAME || userInfo().username || ''
+  } catch {
+    resolved = ''
+  }
+  cachedOsUsername = resolved
+  return resolved
+}
+
 export function buildHostMeta(): Partial<SecurityEvent> {
   // Note: `pid` is intentionally NOT set here. Application-layer events set
   // it to `process.pid` (the plugin's own pid) for diagnostic correlation;
@@ -1626,5 +1647,6 @@ export function buildHostMeta(): Partial<SecurityEvent> {
   return {
     host_id: hostname(),
     container_id: process.env.CONTAINER_ID || 'host',
+    username: resolveOsUsername(),
   }
 }

@@ -86,11 +86,15 @@ describe('EventEmitter', () => {
 
     it('propagates the host_meta fields from LocalNdjsonSink.buildHostMeta()', () => {
       const event = emitter.makeBaseEvent('agent_session_start', makeSession())
-      // buildHostMeta() always populates host_id / container_id
+      // buildHostMeta() always populates host_id / container_id / username
       // (possibly empty strings in test contexts where neither is set).
       // The shape is stable across hosts.
       expect('host_id' in event).toBe(true)
       expect('container_id' in event).toBe(true)
+      // The executing-user identity — resolved from the OS, so assert
+      // presence and type rather than a specific username.
+      expect(typeof event.username).toBe('string')
+      expect((event.username as string).length).toBeGreaterThan(0)
     })
 
     it('stamps session_title only when the session context carries one', () => {

@@ -308,6 +308,13 @@ export interface SecurityEvent {
    */
   exit_signal?: NodeJS.Signals | null
   process_name?: string
+  /**
+   * OS login username of the user executing the event producer (the
+   * "executing user" identity for audit attribution). Stamped by
+   * `buildHostMeta()` from USER → USERNAME → os.userInfo(); '' when
+   * unresolvable. Sits alongside uid / gid / euid (numeric process
+   * identity) as the human-readable counterpart.
+   */
   username?: string
   uid?: number
   gid?: number
